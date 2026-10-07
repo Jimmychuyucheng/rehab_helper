@@ -1,0 +1,26 @@
+# train
+
+# testing adding data aug random move
+# model_config
+# have try SGD but can't find best config for it
+# Please set dataset unchange first 
+# Using lr rate 1e-2 always get bed result
+comment: 'testing ctrgcn alter CTGC on wlasl100 with remove both hand and adding lstm for temprole modeling'
+wandb_tags : ['wlasl100']
+# wandb_mode : 'online'
+device : 'cuda:0'
+lr :  0.001
+epoch : 120
+batch_size : 1
+patience : 10
+num_class: 100
+weight_decay : 0
+optimizer : 'Adam'
+model_name : 'ctrgcn'
+graph: 'model.graph.rtmw_whole_body60_graph.Graph'
+max_frame : 50
+aug : ['random_shift','random_move','random_rot']
+# directory config
+data_info_path : "./data_info/wlasl/asl100.json"
+dir_path :  "./landmarks/wlasl_rtmw60"
+# save_path : "./weights/test_best_config.pth"

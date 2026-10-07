@@ -1,0 +1,12 @@
+# test
+# model_config
+device : 'cuda:0'
+num_class: 100
+graph: 'model.graph.rtmw_whole_body_graph.Graph'
+
+# directory config
+data_info_path : "./data_info/wlasl/asl100.json"
+dir_path :  "./landmarks/wlasl_rtmw"
+weight_path : "./weight.pth"
+
+seed: 33

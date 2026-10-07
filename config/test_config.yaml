@@ -1,0 +1,16 @@
+# test
+# model_config
+##drink thin
+device : 'cuda:0'
+num_class: 100
+graph: 'model.graph.rtmw_whole_body60_graph.Graph'
+max_frame : 50
+# directory config
+if_video : False
+model_name : ctrgcn
+data_info_path : "./data_info/wlasl/asl100.json"
+dir_path :  "./landmarks/wlasl_rtmw60"
+weight_path : "./weights/5aa55624.pth" # best weight : ./weights/5aa55624.pth
+
+
+seed: 33

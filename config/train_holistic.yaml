@@ -1,0 +1,13 @@
+# train
+# model_config
+device : 'cuda:0'
+lr : 1e-3 
+epoch : 70
+batch_size : 32
+num_class: 100
+graph: 'model.graph.mediapipe_wholebody_graph.Graph'
+
+# directory config
+data_info_path : "./data_info/wlasl/asl100.json"
+dir_path :  "./landmarks/wlasl_mediapipe_nose"
+save_path : "./weights/train100_mp.pth"

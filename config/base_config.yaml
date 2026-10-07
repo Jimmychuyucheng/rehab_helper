@@ -1,0 +1,29 @@
+# train
+
+# testing adding data aug random move
+# model_config
+# have try SGD but can't find best config for it
+# Please set dataset unchange first 
+# Using lr rate 1e-2 always get bed result
+# set dropout to 0.5
+comment: 'train wlasl2000 add label smoothing and weight decay 1e-3 pretrain S3D'
+# wandb_mode : 'online'
+# wandb_tags : ['S3D','wlasl200']
+device : 'cuda:0'
+lr :  0.001
+epoch : 100
+batch_size : 16
+patience : 10
+num_class: 100
+weight_decay : 1e-3
+optimizer : 'AdamW'
+# nesterov : 'True'
+model_name : ctrgcn
+graph: 'model.graph.rtmw_whole_body60_graph.Graph'
+max_frame : 64
+# warmup_steps : 10
+aug : ['random_rot','random_move']
+# directory config
+data_info_path : "./data_info/wlasl/asl2000.json"
+dir_path :  "./landmarks/wlasl_rtmw60"
+# save_path : "./weights/test_best_config.pth"
