@@ -20,4 +20,4 @@ A_vis/
 result_vis/
 *.ipynb
 pretrained_models/
-```
+data/kimore/
