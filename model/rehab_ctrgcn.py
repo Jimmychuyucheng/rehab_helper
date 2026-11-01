@@ -112,15 +112,16 @@ class CTRGC(nn.Module):
 
 class unit_ctrgcn(nn.Module):
 
-    def __init__(self, in_channels, out_channels, A, layer_num):
+    def __init__(self, in_channels, out_channels, A, layer_num, gc_type="alter"):
         super(unit_ctrgcn, self).__init__()
         self.out_c = out_channels
         self.in_c = in_channels
         
         self.num_subset = A.shape[0]
+        gc_cls = {"alter": Alter_CTRGC, "origin": CTRGC}[gc_type]
         self.convs = nn.ModuleList()
         for i in range(self.num_subset):
-            self.convs.append(Alter_CTRGC(in_channels, out_channels))
+            self.convs.append(gc_cls(in_channels, out_channels))
         if in_channels != out_channels:
             self.down = nn.Sequential(
                 nn.Conv2d(in_channels, out_channels, 1),
@@ -144,9 +145,9 @@ class unit_ctrgcn(nn.Module):
         return self.act(y)
 
 class TCN_GCN_unit(nn.Module):
-    def __init__(self, in_channels, out_channels, A, stride=1, residual=True,  kernel_size=5, dilations=[1,2], layer_num=0, num_point=21, t=50):
+    def __init__(self, in_channels, out_channels, A, stride=1, residual=True,  kernel_size=5, dilations=[1,2], layer_num=0, num_point=21, t=50, gc_type="alter"):
         super(TCN_GCN_unit, self).__init__()
-        self.gcn1 = unit_ctrgcn(in_channels, out_channels, A, layer_num= layer_num)
+        self.gcn1 = unit_ctrgcn(in_channels, out_channels, A, layer_num= layer_num, gc_type=gc_type)
         self.tcn1 = MSTCN(out_channels, out_channels, kernel_size=kernel_size, stride=stride, dilations=dilations, residual=residual,t=t)
         self.bn = nn.BatchNorm2d(out_channels)
         self.act =  nn.ReLU(inplace=True)
@@ -165,7 +166,7 @@ class TCN_GCN_unit(nn.Module):
 
 # graph module position model.graph
 class Model(nn.Module):
-    def __init__(self, num_class=1, num_point=25, num_person=1, in_channels=3, drop_out=0.2, **kwargs):
+    def __init__(self, num_class=1, num_point=25, num_person=1, in_channels=3, drop_out=0.2, init_bias=0.75, gc_type="alter", **kwargs):
         super(Model, self).__init__()
         
         # 載入 25 節點相鄰矩陣 (形狀: 3, 25, 25)
@@ -181,17 +182,18 @@ class Model(nn.Module):
         self.data_bn = nn.BatchNorm1d(num_person * in_channels * num_point)
         
         # 7 層 TCN_GCN_unit 保持不變，內部傳入 num_point=25
-        self.l1 = TCN_GCN_unit(in_channels, base_channel, A.clone(), residual=False, layer_num=1, num_point=num_point)
-        self.l2 = TCN_GCN_unit(base_channel, base_channel, A.clone(), layer_num=2, num_point=num_point)
-        self.l3 = TCN_GCN_unit(base_channel, base_channel, A.clone(), layer_num=3, num_point=num_point)
-        self.l4 = TCN_GCN_unit(base_channel, base_channel, A.clone(), layer_num=4, num_point=num_point)
-        self.l5 = TCN_GCN_unit(base_channel, base_channel*2, A.clone(), stride=2, layer_num=5, num_point=num_point)
-        self.l6 = TCN_GCN_unit(base_channel*2, base_channel*2, A.clone(), layer_num=6, num_point=num_point)
-        self.l7 = TCN_GCN_unit(base_channel*2, base_channel*2, A.clone(), layer_num=7, num_point=num_point)
+        self.l1 = TCN_GCN_unit(in_channels, base_channel, A.clone(), residual=False, layer_num=1, num_point=num_point, gc_type=gc_type)
+        self.l2 = TCN_GCN_unit(base_channel, base_channel, A.clone(), layer_num=2, num_point=num_point, gc_type=gc_type)
+        self.l3 = TCN_GCN_unit(base_channel, base_channel, A.clone(), layer_num=3, num_point=num_point, gc_type=gc_type)
+        self.l4 = TCN_GCN_unit(base_channel, base_channel, A.clone(), layer_num=4, num_point=num_point, gc_type=gc_type)
+        self.l5 = TCN_GCN_unit(base_channel, base_channel*2, A.clone(), stride=2, layer_num=5, num_point=num_point, gc_type=gc_type)
+        self.l6 = TCN_GCN_unit(base_channel*2, base_channel*2, A.clone(), layer_num=6, num_point=num_point, gc_type=gc_type)
+        self.l7 = TCN_GCN_unit(base_channel*2, base_channel*2, A.clone(), layer_num=7, num_point=num_point, gc_type=gc_type)
         
         # 將全連接層輸出改成 1 (預測臨床連續評分)
         self.fc = nn.Linear(base_channel * 2, 1)
-        nn.init.normal_(self.fc.weight, 0, math.sqrt(2. / 1))
+        nn.init.normal_(self.fc.weight, 0, 0.01)
+        nn.init.constant_(self.fc.bias, init_bias)
         bn_init(self.data_bn, 1)
         self.drop_out = nn.Dropout(drop_out) if drop_out else (lambda x: x)
 
