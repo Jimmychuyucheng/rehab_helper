@@ -21,3 +21,4 @@ result_vis/
 *.ipynb
 pretrained_models/
 data/kimore/
+runs/
