@@ -190,10 +190,18 @@ class Model(nn.Module):
         self.l6 = TCN_GCN_unit(base_channel*2, base_channel*2, A.clone(), layer_num=6, num_point=num_point, gc_type=gc_type)
         self.l7 = TCN_GCN_unit(base_channel*2, base_channel*2, A.clone(), layer_num=7, num_point=num_point, gc_type=gc_type)
         
-        # 將全連接層輸出改成 1 (預測臨床連續評分)
-        self.fc = nn.Linear(base_channel * 2, 1)
+        # 全連接層輸出 num_class 個臨床連續評分 (1 = TS；3 = TS/PO/CF 多任務)
+        # init_bias：num_class=1 時為 float；多輸出時為長度 num_class 的序列 (各自訓練集正規化平均)
+        self.fc = nn.Linear(base_channel * 2, num_class)
         nn.init.normal_(self.fc.weight, 0, 0.01)
-        nn.init.constant_(self.fc.bias, init_bias)
+        if np.ndim(init_bias) == 0:
+            nn.init.constant_(self.fc.bias, float(init_bias))
+        else:
+            bias = torch.as_tensor(np.asarray(init_bias, dtype=np.float32))
+            if bias.shape != (num_class,):
+                raise ValueError(f"init_bias 長度 {tuple(bias.shape)} 與 num_class={num_class} 不符")
+            with torch.no_grad():
+                self.fc.bias.copy_(bias)
         bn_init(self.data_bn, 1)
         self.drop_out = nn.Dropout(drop_out) if drop_out else (lambda x: x)
 
@@ -217,7 +225,7 @@ class Model(nn.Module):
         
         # 時序全域平均池化 (對動作整段進行綜合評分)
         global_feat = feat_pooled.mean(dim=2) # (N, 128)
-        score = self.fc(self.drop_out(global_feat)) # (N, 1) 臨床量化評分
+        score = self.fc(self.drop_out(global_feat)) # (N, num_class) 臨床量化評分
         
         if return_feature:
             return score, feat_pooled

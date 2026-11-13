@@ -9,6 +9,11 @@
     python train_rehab.py --name baseline                 # 5 折
     python train_rehab.py --name smoke --folds 0 --epochs 5
     python train_rehab.py --overfit                       # 過擬合測試 (16 筆)
+
+    多任務 (v4)：--targets ts,po,cf → 同時預測 TS/PO/CF (各自除以滿分正規化)，
+    loss = 三個輸出 Huber 的平均；early stopping 仍依驗證集 TS MAE；
+    另外報告 ts_sum = clip(PO) + clip(CF) 再 clip 到 [10, 50]。
+    python train_rehab.py --name v4_mt --targets ts,po,cf --pkl data/kimore/processed/kimore_full_pofix.pkl
 ================================================================================
 """
 import os
@@ -33,6 +38,7 @@ from model.rehab_ctrgcn import Model
 
 TS_MAX = SCORE_MAX["ts"]
 TS_MIN = 10.0
+SCORE_MIN = {"ts": 10.0, "po": 3.0, "cf": 7.0}   # 各分數的合理下限 (上限為 SCORE_MAX)
 EXERCISES = ["Es1", "Es2", "Es3", "Es4", "Es5"]
 
 
@@ -56,10 +62,30 @@ def parse_args():
     ap.add_argument("--no_clip", dest="clip", action="store_false")
     ap.add_argument("--reweight", choices=["none", "inv", "sqrt_inv"], default="none",
                     help="依訓練集 TS 分箱 (5 分一格) 的樣本加權")
+    ap.add_argument("--targets", default="ts",
+                    help="逗號分隔，例如 ts 或 ts,po,cf；第一個必須是 ts (early stopping 依 TS MAE)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--overfit", action="store_true")
     ap.add_argument("--device", default="auto")
-    return ap.parse_args()
+    args = ap.parse_args()
+    targets = tuple(t.strip() for t in args.targets.split(",") if t.strip())
+    if not targets or targets[0] != "ts" or len(set(targets)) != len(targets) \
+            or any(t not in SCORE_MAX for t in targets):
+        ap.error(f"--targets 需以 ts 開頭、不重複，且只能是 {list(SCORE_MAX)}：{args.targets}")
+    args.targets = targets
+    return args
+
+
+def is_multitask(targets):
+    return len(targets) > 1
+
+
+def ts_sum_from(preds, targets, clip=True):
+    """preds: (N, len(targets)) 原始分數。回傳 PO + CF (已各自 clip) 再 clip 到 [10, 50]；沒有 po/cf 時回傳 None。"""
+    if "po" not in targets or "cf" not in targets:
+        return None
+    s = preds[:, targets.index("po")] + preds[:, targets.index("cf")]
+    return np.clip(s, TS_MIN, TS_MAX) if clip else s
 
 
 def set_seed(seed):
@@ -188,30 +214,39 @@ def train_one_epoch(model, loader, opt, sched, criterion, device, weights=None):
         opt.step()
         sched.step()
         losses.append(loss.item())
-        abs_err += (pred.detach() - y).abs().sum().item() * TS_MAX
+        abs_err += (pred.detach()[:, 0] - y[:, 0]).abs().sum().item() * TS_MAX  # 第 0 欄 = TS
         n += len(y)
     return float(np.mean(losses)), abs_err / n
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, clip=False):
-    """回傳 (indices, y_true, y_pred)，分數為 0~50。x 可為 (B,3,T,V) 或 (B,K,3,T,V)。
-    clip=True 時把預測夾在 [10/50, 1] (TS 最低 10 分)；只用於評估，訓練 loss 不夾。"""
+def evaluate(model, loader, device, clip=False, targets=("ts",), all_targets=False):
+    """回傳 (indices, y_true, y_pred)，原始分數 (TS 0~50)。x 可為 (B,3,T,V) 或 (B,K,3,T,V)。
+    clip=True 時把各輸出夾在 [下限/滿分, 1] (TS [10,50]、PO [3,15]、CF [7,35])；只用於評估，訓練 loss 不夾。
+    all_targets=False：只回傳 TS (第 0 欄)，shape (N,)；True：回傳 (N, len(targets))。"""
     model.eval()
+    lo = torch.tensor([SCORE_MIN[t] / SCORE_MAX[t] for t in targets])
+    scale = np.array([SCORE_MAX[t] for t in targets], dtype=np.float32)
     idx, ys, ps = [], [], []
     for b in loader:
         x = b["x"].to(device)
         pred = predict_windows(lambda z: model(z), x) if x.dim() == 5 else model(x)
         if clip:
-            pred = pred.clamp(TS_MIN / TS_MAX, 1.0)
+            if len(targets) == 1:
+                pred = pred.clamp(lo.item(), 1.0)
+            else:
+                pred = torch.maximum(pred, lo.to(pred.device)).clamp(max=1.0)
         idx += b["index"].tolist()
-        ys.append(b["y"][:, 0].numpy() * TS_MAX)
-        ps.append(pred[:, 0].cpu().numpy() * TS_MAX)
-    return idx, np.concatenate(ys), np.concatenate(ps)
+        ys.append(b["y"].numpy() * scale)
+        ps.append(pred.cpu().numpy() * scale)
+    yt, yp = np.concatenate(ys), np.concatenate(ps)
+    if not all_targets:
+        yt, yp = yt[:, 0], yp[:, 0]
+    return idx, yt, yp
 
 
 def build_model(args, init_bias, device):
-    return Model(num_class=1, num_point=25, in_channels=3, init_bias=init_bias,
+    return Model(num_class=len(args.targets), num_point=25, in_channels=3, init_bias=init_bias,
                  gc_type=args.gc_type).to(device)
 
 
@@ -219,6 +254,12 @@ def make_criterion(args):
     if args.loss == "huber":
         return nn.HuberLoss(delta=args.huber_delta, reduction="none")
     return nn.MSELoss(reduction="none")
+
+
+def target_init_bias(samples, idx, targets):
+    """各 target 在 idx 上的正規化平均；單任務回傳 float (與 baseline 相同)，多任務回傳 list。"""
+    b = [float(np.mean([samples[i][t] / SCORE_MAX[t] for i in idx])) for t in targets]
+    return b[0] if len(b) == 1 else b
 
 
 def no_augmentor():
@@ -230,12 +271,15 @@ def run_overfit(args, device, n_samples=16, steps=300):
     samples, _ = load_kimore(args.pkl)
     split = make_split(samples, 0, 5, 0.15, 42)
     idx = split["train"][:n_samples]
-    ds = RehabDataset(samples, idx, train=True, crop_ratio=(1.0, 1.0), augmentor=no_augmentor())
+    targets = args.targets
+    ds = RehabDataset(samples, idx, train=True, crop_ratio=(1.0, 1.0), augmentor=no_augmentor(),
+                      targets=targets)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, drop_last=True)
     eval_loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False)
 
     y_all = np.array([samples[i]["ts"] for i in idx])
-    model = build_model(args, float(y_all.mean() / TS_MAX), device)
+    init_bias = float(y_all.mean() / TS_MAX) if len(targets) == 1 else target_init_bias(samples, idx, targets)
+    model = build_model(args, init_bias, device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     epochs = math.ceil(steps / len(loader))
     sched = make_scheduler(opt, args.warmup * len(loader), epochs * len(loader))
@@ -250,16 +294,21 @@ def run_overfit(args, device, n_samples=16, steps=300):
             _, yt, yp = evaluate(model, eval_loader, device)
             print(f"[overfit] ep {ep:3d} | loss {loss:.5f} | train MAE {tr_mae:.3f} | "
                   f"eval MAE {np.abs(yt - yp).mean():.3f} | {time.time() - t0:.0f}s")
-    _, yt, yp = evaluate(model, eval_loader, device)
-    mae = float(np.abs(yt - yp).mean())
-    print(f"[overfit] 最終 16 筆 MAE = {mae:.3f} 分 → {'通過' if mae < 1.0 else '未通過'} (門檻 < 1.0)")
+    _, yt, yp = evaluate(model, eval_loader, device, targets=targets, all_targets=True)
+    maes = np.abs(yt - yp).mean(axis=0)
+    mae = float(maes[0])
+    if len(targets) > 1:
+        print("[overfit] 各輸出 MAE: " + ", ".join(
+            f"{t.upper()} {m:.3f} 分 ({m / SCORE_MAX[t] * 100:.1f}%)" for t, m in zip(targets, maes)))
+    print(f"[overfit] 最終 16 筆 TS MAE = {mae:.3f} 分 → {'通過' if mae < 1.0 else '未通過'} (門檻 < 1.0)")
     for t, p in zip(yt, yp):
-        print(f"   y={t:6.2f}  pred={p:6.2f}")
+        print("   " + "  ".join(f"{n}: y={a:6.2f} pred={b:6.2f}" for n, a, b in zip(targets, t, p)))
     return mae
 
 
 # ==================== 單折 ====================
-def run_fold(args, fold, device, baselines):
+def run_fold(args, fold, device, baselines, extra_baselines=None):
+    """baselines: TS 的 mean_baseline per_fold；extra_baselines: {target: per_fold}，多任務的 PO/CF 用。"""
     out_dir = os.path.join("runs", args.name, f"fold{fold}")
     metrics_path = os.path.join(out_dir, "metrics.json")
     if os.path.exists(metrics_path):
@@ -271,10 +320,12 @@ def run_fold(args, fold, device, baselines):
 
     loaders, split, samples = build_dataloaders(
         args.pkl, fold, n_folds=5, val_ratio=0.15, seed=42, batch_size=args.batch_size,
-        num_workers=0, out_frames=100, targets=("ts",), crop_ratio=(0.4, 0.6),
+        num_workers=0, out_frames=100, targets=args.targets, crop_ratio=(0.4, 0.6),
         eval_windows=5, eval_crop_ratio=0.5, augmentor=no_augmentor() if args.no_aug else None)
 
-    init_bias = float(np.mean([samples[i]["ts"] / TS_MAX for i in split["train"]]))
+    targets = args.targets
+    multi = is_multitask(targets)
+    init_bias = target_init_bias(samples, split["train"], targets)
     weights, w_stats = reweight_table(samples, split["train"], args.reweight)
     if w_stats:
         print(f"fold {fold}: reweight={args.reweight} " +
@@ -284,8 +335,11 @@ def run_fold(args, fold, device, baselines):
     steps_per_epoch = len(loaders["train"])
     sched = make_scheduler(opt, args.warmup * steps_per_epoch, args.epochs * steps_per_epoch)
     criterion = make_criterion(args)
+    bias_txt = (f"init_bias {init_bias:.4f} ({init_bias * TS_MAX:.2f} 分)" if not multi else
+                "init_bias " + ", ".join(f"{t.upper()} {b:.4f} ({b * SCORE_MAX[t]:.2f} 分)"
+                                         for t, b in zip(targets, init_bias)))
     print(f"fold {fold}: train {len(split['train'])} / val {len(split['val'])} / test {len(split['test'])} 筆，"
-          f"init_bias {init_bias:.4f} ({init_bias * TS_MAX:.2f} 分)，device {device}")
+          f"{bias_txt}，targets {','.join(targets)}，device {device}")
 
     log_path = os.path.join(out_dir, "log.csv")
     best_path = os.path.join(out_dir, "best.pt")
@@ -299,7 +353,7 @@ def run_fold(args, fold, device, baselines):
         t0 = time.time()
         lr = opt.param_groups[0]["lr"]
         loss, tr_mae = train_one_epoch(model, loaders["train"], opt, sched, criterion, device, weights)
-        _, yt, yp = evaluate(model, loaders["val"], device, args.clip)
+        _, yt, yp = evaluate(model, loaders["val"], device, args.clip, targets)   # 只取 TS：early stopping 依 TS MAE
         vm = regression_metrics(yt, yp)
         sec = time.time() - t0
         with open(log_path, "a", newline="") as f:
@@ -321,14 +375,26 @@ def run_fold(args, fold, device, baselines):
 
     # 只在這裡用最佳模型跑一次測試集
     model.load_state_dict(torch.load(best_path, map_location=device, weights_only=True))
-    idx, yt, yp = evaluate(model, loaders["test"], device, args.clip)
+    idx, YT, YP = evaluate(model, loaders["test"], device, args.clip, targets, all_targets=True)
+    yt, yp = YT[:, 0], YP[:, 0]
+    ts_sum = ts_sum_from(YP, targets, clip=args.clip)
 
     with open(os.path.join(out_dir, "test_predictions.csv"), "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["index", "subject_key", "subgroup", "exercise", "y_true", "y_pred"])
-        for i, t, p in zip(idx, yt, yp):
+        extra = []
+        for t in targets[1:]:
+            extra += [f"y_true_{t}", f"y_pred_{t}"]
+        if ts_sum is not None:
+            extra.append("y_pred_ts_sum")
+        w.writerow(["index", "subject_key", "subgroup", "exercise", "y_true", "y_pred"] + extra)
+        for r, i in enumerate(idx):
             s = samples[i]
-            w.writerow([i, s["subject_key"], s["subgroup"], s["exercise"], f"{t:.4f}", f"{p:.4f}"])
+            row = [i, s["subject_key"], s["subgroup"], s["exercise"], f"{yt[r]:.4f}", f"{yp[r]:.4f}"]
+            for k in range(1, len(targets)):
+                row += [f"{YT[r, k]:.4f}", f"{YP[r, k]:.4f}"]
+            if ts_sum is not None:
+                row.append(f"{ts_sum[r]:.4f}")
+            w.writerow(row)
 
     m = regression_metrics(yt, yp)
     by_ex, by_sub = defaultdict(list), defaultdict(list)
@@ -349,11 +415,27 @@ def run_fold(args, fold, device, baselines):
         "train_time_sec": train_time,
         "baseline_global_mae": float(baselines[fold, 0]),
         "baseline_per_ex_mae": float(baselines[fold, 1]),
+        "targets": list(targets),
         "n_test": len(yt),
         "args": vars(args),
     }
+    if multi:
+        for k, t in enumerate(targets[1:], start=1):
+            mt = regression_metrics(YT[:, k], YP[:, k])
+            metrics[t] = {**mt, "mae_norm": mt["mae"] / SCORE_MAX[t],
+                          "baseline_global_mae": float(extra_baselines[t][fold, 0]),
+                          "baseline_per_ex_mae": float(extra_baselines[t][fold, 1])}
+        if ts_sum is not None:
+            ms = regression_metrics(yt, ts_sum)
+            metrics["ts_sum"] = {**ms, **range_metrics(yt, ts_sum, [samples[i]["subject_key"] for i in idx]),
+                                 "mean_abs_diff_vs_head": float(np.abs(ts_sum - yp).mean())}
     with open(metrics_path, "w") as f:
         json.dump(metrics, f, indent=2, ensure_ascii=False)
+    if multi:
+        print(f"fold {fold} test | " + " | ".join(
+            f"{t.upper()} MAE {metrics[t]['mae']:.3f} (盲猜 {metrics[t]['baseline_per_ex_mae']:.3f}) "
+            f"ρ {metrics[t]['pearson']:+.3f}" for t in targets[1:]) +
+            (f" | ts_sum MAE {metrics['ts_sum']['mae']:.3f}" if "ts_sum" in metrics else ""))
     print(f"fold {fold} test | MAE {m['mae']:.3f} | RMSE {m['rmse']:.3f} | ρ {m['pearson']:+.3f} | "
           f"pred std {metrics['pred_std']:.2f} | baseline(依動作) {baselines[fold, 1]:.3f} | "
           f"best ep {best_ep} | {train_time / 60:.1f} 分鐘")
@@ -417,6 +499,33 @@ def write_summary(args, results):
         lines.append("| mean | " + " | ".join(
             f"{np.mean([r[key][c] for r in results if c in r[key]]):.2f}" for c in cols) + " |")
 
+    if all(r.get("targets", ["ts"])[1:] for r in results):
+        extra = [t for t in results[0]["targets"][1:]]
+        hdr = " | ".join(f"{t.upper()} 盲猜 MAE | {t.upper()} MAE | {t.upper()} ρ | 贏？" for t in extra)
+        lines += ["", "## " + " / ".join(t.upper() for t in extra) +
+                  "（盲猜 = 訓練集各動作平均）", "",
+                  f"| Fold | {hdr} | ts_sum MAE | \\|ts_head − ts_sum\\| |",
+                  "|---" * (len(extra) * 4 + 3) + "|"]
+        for r in results:
+            cells = []
+            for t in extra:
+                e = r[t]
+                cells.append(f"{e['baseline_per_ex_mae']:.2f} | {e['mae']:.2f} | {e['pearson']:.3f} | "
+                             f"{'✓' if e['mae'] < e['baseline_per_ex_mae'] else '✗'}")
+            ss = r.get("ts_sum")
+            lines.append(f"| {r['fold']} | " + " | ".join(cells) +
+                         (f" | {ss['mae']:.2f} | {ss['mean_abs_diff_vs_head']:.2f} |" if ss else " | – | – |"))
+        cells = []
+        for t in extra:
+            wins_t = sum(r[t]["mae"] < r[t]["baseline_per_ex_mae"] for r in results)
+            cells.append(f"{_ms([r[t]['baseline_per_ex_mae'] for r in results])} | "
+                         f"{_ms([r[t]['mae'] for r in results])} | "
+                         f"{_ms([r[t]['pearson'] for r in results], '{:.3f}')} | {wins_t} / {len(results)} 折")
+        has_sum = all("ts_sum" in r for r in results)
+        lines.append("| mean ± std | " + " | ".join(cells) +
+                     (f" | {_ms([r['ts_sum']['mae'] for r in results])} | "
+                      f"{_ms([r['ts_sum']['mean_abs_diff_vs_head'] for r in results])} |" if has_sum else " | – | – |"))
+
     # 分數區間：從 test_predictions.csv 重算，舊 run 的 metrics.json 沒有這些欄位也能用
     preds = {r["fold"]: read_predictions(os.path.join("runs", args.name, f"fold{r['fold']}",
                                                       "test_predictions.csv")) for r in results}
@@ -444,8 +553,9 @@ def main():
     folds = [int(k) for k in args.folds.split(",")]
     samples, _ = load_kimore(args.pkl)
     baselines = mean_baseline(samples, n_folds=5)["per_fold"]
+    extra_baselines = {t: mean_baseline(samples, n_folds=5, target=t)["per_fold"] for t in args.targets[1:]}
     os.makedirs(os.path.join("runs", args.name), exist_ok=True)
-    results = [run_fold(args, k, device, baselines) for k in folds]
+    results = [run_fold(args, k, device, baselines, extra_baselines) for k in folds]
     write_summary(args, results)
 
 

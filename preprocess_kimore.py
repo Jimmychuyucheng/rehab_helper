@@ -23,13 +23,20 @@
 8. subject_key = "{subgroup}/{subject}"，保證跨組別唯一，供受試者切分使用。
 9. 結尾印出統計與「同一受試者五個動作分數完全相同」的警告，方便抓標籤錯誤。
 
+【v4 標籤修正】fix_scores()
+    PO 依 EAAQ 計分規則為三題各 1–5 分，最小 3。原始資料有 3 筆 PO < 3，
+    經 KIMORE 作者 (L. Romeo, 2026-11-13) 確認：補成 3 (不刪除)，TS 重算為 PO + CF。
+    每筆樣本帶 sample["label_fix"] = {"po_orig", "ts_orig"} 或 None；meta["label_fixes"] 彙整。
+    其他不一致 (例如 Expert/E_ID4 Es5 的 TS 與 PO+CF 差 0.67) 一律不動。
+    預設輸出 kimore_full_pofix.pkl；加 --no_fix 才輸出未修正的 kimore_full.pkl (重現舊結果用)。
+
 --------------------------------------------------------------------------------
 【座標系說明】(Kinect v2 camera space，單位公尺)
     X: 受試者左右方向   Y: 垂直向上   Z: 鏡頭到受試者的深度
     校準後：原點 = 開頭幾幀的 SpineBase 平均位置；左右髖連線對齊 X 軸；
             長度單位 = 「SpineBase → SpineShoulder」軀幹長 (約 0.5 m)。
 
-【輸出】data/kimore/processed/kimore_full.pkl
+【輸出】data/kimore/processed/kimore_full_pofix.pkl (--no_fix: kimore_full.pkl)
     {
       "meta":    {...版本、關節名稱、左右對稱表、校準參數...},
       "samples": [ {
@@ -38,6 +45,7 @@
           "skeleton": float32 (3, T_orig, 25),
           "num_frames": T_orig,
           "ts", "po", "cf": float  (clinical Total / Primary Outcome / Control Factors)
+          "label_fix": None 或 {"po_orig", "ts_orig"}
       }, ... ]
     }
 ================================================================================
@@ -55,7 +63,10 @@ import pandas as pd
 # ==================== 路徑與參數設定 ====================
 RAW_DATA_DIR = "./data/kimore/raw"
 PROCESSED_DIR = "./data/kimore/processed"
-OUTPUT_NAME = "kimore_full.pkl"
+OUTPUT_NAME = "kimore_full_pofix.pkl"      # 套用 fix_scores()
+OUTPUT_NAME_NOFIX = "kimore_full.pkl"      # --no_fix：原始標籤 (v2 結果)
+PO_MIN = 3.0                               # EAAQ：PO 三題各 1–5 分
+LABEL_FIX_NOTE = "PO<3 set to 3 per KIMORE author (L. Romeo, 2026-11-13); TS recomputed as PO+CF"
 
 MIN_FRAMES = 15          # 少於此幀數視為無效錄影
 REF_FRAMES = 10          # 用開頭幾幀計算平移與旋轉 (受試者此時為站立預備姿勢)
@@ -192,8 +203,24 @@ def parse_clinical_scores(label_dir: str, ex_num: int):
     return {"ts": scores["ts"], "po": scores.get("po"), "cf": scores.get("cf")}
 
 
+def fix_scores(sample):
+    """
+    PO < 3 不符合 EAAQ 計分規則 (最小 3)：設為 3 並重算 TS = PO + CF。
+    原值記在 sample["label_fix"]；沒修正的為 None。其他情況一律不動。原地修改並回傳 sample。
+    """
+    sample["label_fix"] = None
+    po, cf = sample.get("po"), sample.get("cf")
+    if po is not None and po < PO_MIN:
+        if cf is None:
+            raise ValueError(f"{sample['subject_key']}/{sample['exercise']}: PO<3 但缺 CF，無法重算 TS")
+        sample["label_fix"] = {"po_orig": po, "ts_orig": sample["ts"]}
+        sample["po"] = PO_MIN
+        sample["ts"] = PO_MIN + cf
+    return sample
+
+
 # ==================== 4. 主流程 ====================
-def run_preprocessing(raw_dir: str = RAW_DATA_DIR, out_dir: str = PROCESSED_DIR):
+def run_preprocessing(raw_dir: str = RAW_DATA_DIR, out_dir: str = PROCESSED_DIR, apply_fix: bool = True):
     print(f"🚀 開始掃描 KIMORE 資料夾: {raw_dir}")
     os.makedirs(out_dir, exist_ok=True)
 
@@ -237,7 +264,7 @@ def run_preprocessing(raw_dir: str = RAW_DATA_DIR, out_dir: str = PROCESSED_DIR)
             skipped["校準後非有限值"].append(tag)
             continue
 
-        samples.append({
+        sample = {
             "group": group,
             "subgroup": subgroup,
             "subject": subject,
@@ -250,7 +277,10 @@ def run_preprocessing(raw_dir: str = RAW_DATA_DIR, out_dir: str = PROCESSED_DIR)
             "po": labels["po"],
             "cf": labels["cf"],
             "align_params": params,
-        })
+        }
+        if apply_fix:
+            sample = fix_scores(sample)
+        samples.append(sample)
 
     report(samples, skipped)
 
@@ -265,7 +295,17 @@ def run_preprocessing(raw_dir: str = RAW_DATA_DIR, out_dir: str = PROCESSED_DIR)
         },
         "samples": samples,
     }
-    out_path = os.path.join(out_dir, OUTPUT_NAME)
+    if apply_fix:
+        fixes = [{"subject_key": s["subject_key"], "exercise": s["exercise"],
+                  "po_orig": s["label_fix"]["po_orig"], "po_new": s["po"],
+                  "ts_orig": s["label_fix"]["ts_orig"], "ts_new": s["ts"]}
+                 for s in samples if s["label_fix"] is not None]
+        payload["meta"]["label_fixes"] = {"note": LABEL_FIX_NOTE, "fixes": fixes}
+        print(f"\n🩹 標籤修正 {len(fixes)} 筆 ({LABEL_FIX_NOTE}):")
+        for fx in fixes:
+            print(f"   {fx['subject_key']} {fx['exercise']}: PO {fx['po_orig']:.2f} → {fx['po_new']:g}, "
+                  f"TS {fx['ts_orig']:.2f} → {fx['ts_new']:.2f}")
+    out_path = os.path.join(out_dir, OUTPUT_NAME if apply_fix else OUTPUT_NAME_NOFIX)
     with open(out_path, "wb") as f:
         pickle.dump(payload, f)
     print(f"💾 已輸出: {out_path}")
@@ -321,4 +361,8 @@ def report(samples, skipped):
 
 
 if __name__ == "__main__":
-    run_preprocessing()
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--no_fix", action="store_true",
+                    help="不套用 PO<3 修正，輸出原始標籤的 kimore_full.pkl")
+    run_preprocessing(apply_fix=not ap.parse_args().no_fix)
