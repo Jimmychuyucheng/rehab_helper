@@ -17,6 +17,11 @@
         --out runs/compare_v4_baseline.md
     python analyze_runs.py baseline v4_ts v4_mt --clip --pkl data/kimore/processed/kimore_full_pofix.pkl \
         --out runs/compare_v4.md
+
+    v5：--group 把多個 run 視為同一設定的重複 (三次平均 ± 標準差、各 fold 範圍、avg vs best、組間比較)：
+    python analyze_runs.py --group baseline=v5_base_s42,v5_base_s43,v5_base_s44 \
+        --group 多任務=v5_mt_s42,v5_mt_s43,v5_mt_s44 --pkl data/kimore/processed/kimore_full_pofix.pkl \
+        --status runs/v5_status.txt --out runs/compare_v5_seeds.md
 ================================================================================
 """
 import argparse
@@ -36,20 +41,30 @@ DIR_THRESHOLD = 0.20   # |PO/15 − CF/35| > 0.20 視為「PO、CF 差異大」
 
 
 # ==================== 讀檔 ====================
-def load_folds(name, clip=False, samples=None):
+RUNS_DIR = "runs"
+
+
+def load_folds(name, clip=False, samples=None, sel="avg"):
     """
     回傳 [{fold, index, subj, exercise, ts_true, ts_pred, (po_true, po_pred, cf_true, cf_pred, ts_sum)}]。
     samples 不為 None 時，真實分數一律依 index 從 pkl 取 (取代 csv 內的 y_true*)。
     clip=True 時事後把預測夾在各自範圍 (TS [10,50]、PO [3,15]、CF [7,35])。
+    sel="best" 時讀 v5 的 y_pred*_best 欄位 (best.pt)；預設 y_pred* (v5 為平均最後 K 個 epoch 的模型)。
     """
-    files = sorted(glob.glob(os.path.join("runs", name, "fold*", "test_predictions.csv")))
+    files = sorted(glob.glob(os.path.join(RUNS_DIR, name, "fold*", "test_predictions.csv")))
     if not files:
-        raise FileNotFoundError(f"runs/{name} 底下找不到 fold*/test_predictions.csv")
+        raise FileNotFoundError(f"{RUNS_DIR}/{name} 底下找不到 fold*/test_predictions.csv")
     out = []
     for path in files:
         with open(path) as f:
             rows = list(csv.DictReader(f))
         fold = int(re.search(r"fold(\d+)", path).group(1))
+        sfx = ""
+        if sel == "best":
+            if "y_pred_best" not in rows[0]:
+                raise ValueError(f"{path} 沒有 y_pred_best 欄位 (不是 --avg_k > 0 的 run)")
+            sfx = "_best"
+        rows = [{**r, **{k[:-len(sfx)]: v for k, v in r.items() if sfx and k.endswith(sfx)}} for r in rows]
         d = {"fold": fold, "index": np.array([int(r["index"]) for r in rows]),
              "subj": [r["subject_key"] for r in rows], "exercise": [r["exercise"] for r in rows],
              "ts_true": np.array([float(r["y_true"]) for r in rows]),
@@ -238,14 +253,255 @@ def consistency(folds):
             "mae_head": float(np.abs(head - yt).mean()), "mae_sum": float(np.abs(sm - yt).mean())}
 
 
+
+# ==================== v5：同一設定的重複 (--group) ====================
+SEL_NAMES = {"avg": "avg（平均最後 K 個 epoch）", "best": "best（驗證 MAE 最低 epoch）"}
+
+
+def _msd(v, fmt="{:.2f}"):
+    """平均 ± 樣本標準差 (ddof=1；只有一個值時 std 記為 –)。"""
+    v = np.asarray(v, float)
+    sd = v.std(ddof=1) if len(v) > 1 else float("nan")
+    return f"{fmt.format(v.mean())} ± " + ("–" if np.isnan(sd) else fmt.format(sd))
+
+
+def _sd(v):
+    v = np.asarray(v, float)
+    return float(v.std(ddof=1)) if len(v) > 1 else float("nan")
+
+
+def direction_stats(folds, samples, thr=DIR_THRESHOLD):
+    """「哪一類比較嚴重」子集的猜對率：模型 / 一律猜多數方向 / 依動作種類猜 (訓練集各動作平均)，
+    並拆成真實 PO 較差、真實 CF 較差各自的猜對數。"""
+    def pct(f, kind):
+        return f[f"po_{kind}"] / SCORE_MAX["po"] - f[f"cf_{kind}"] / SCORE_MAX["cf"]
+    d_true = np.concatenate([pct(f, "true") for f in folds])
+    d_pred = np.concatenate([pct(f, "pred") for f in folds])
+    d_blind = np.concatenate([blind_predictions(samples, f["fold"], "po", f["index"]) / SCORE_MAX["po"] -
+                              blind_predictions(samples, f["fold"], "cf", f["index"]) / SCORE_MAX["cf"]
+                              for f in folds])
+    m = np.abs(d_true) > thr
+    st, sp, sb = np.sign(d_true[m]), np.sign(d_pred[m]), np.sign(d_blind[m])
+    n = int(m.sum())
+    po_low, cf_low = st < 0, st > 0
+    return {"n": n, "acc": float((sp == st).mean()), "acc_blind": float((sb == st).mean()),
+            "majority": max(po_low.sum(), cf_low.sum()) / n if n else float("nan"),
+            "n_po_low": int(po_low.sum()), "n_cf_low": int(cf_low.sum()),
+            "ok_po_low": int((sp[po_low] == -1).sum()), "ok_cf_low": int((sp[cf_low] == 1).sum()),
+            "blind_ok_po_low": int((sb[po_low] == -1).sum()), "blind_ok_cf_low": int((sb[cf_low] == 1).sum())}
+
+
+def run_status(names, status_file):
+    """各 run 完成的折數 (有 metrics.json)，以及 status 檔中的結束碼。"""
+    codes = {}
+    if status_file and os.path.exists(status_file):
+        for line in open(status_file):
+            mm = re.match(r"(\S+) exit=(\d+) minutes=(\d+)", line)
+            if mm:
+                codes[mm.group(1)] = (int(mm.group(2)), int(mm.group(3)))
+    lines = ["| run | 完成折數 | 結束碼 | 耗時（分） | 狀態 |", "|---|---|---|---|---|"]
+    ok_all = True
+    for n in names:
+        k = len(glob.glob(os.path.join(RUNS_DIR, n, "fold*", "metrics.json")))
+        rc, mins = codes.get(n, (None, None))
+        ok = k == 5 and rc in (0, None)
+        ok_all &= ok
+        lines.append(f"| {n} | {k} / 5 | {'–' if rc is None else rc} | {'–' if mins is None else mins} | "
+                     f"{'✓' if ok else '**✗ 失敗**'} |")
+    return ok_all, lines
+
+
+def group_report(groups, samples, clip=False, status_file=None):
+    """groups: [(組名, [run 名稱])]。輸出 markdown 行。"""
+    from dataset import mean_baseline
+    blind_ts = mean_baseline(samples, n_folds=5, target="ts")["per_fold"][:, 1]
+    all_names = [n for _, ns in groups for n in ns]
+    ok_all, st_lines = run_status(all_names, status_file)
+    lines = ["# v5：同一設定重複 3 次（seed 42/43/44）", "",
+             f"真實分數取自 pkl（依 index 對應）。± 為三次之間的**樣本標準差**（ddof=1）。"
+             f"TS 盲猜（依動作）各折 MAE：{' / '.join(f'{v:.2f}' for v in blind_ts)}（mean {np.mean(blind_ts):.2f}）。", "",
+             "## 0. Run 狀態", ""] + st_lines + ["", "全部成功" if ok_all else "**有 run 失敗或未完成，見上表**", ""]
+
+    data = {}   # (group, sel) -> {run: folds}
+    for g, names in groups:
+        for sel in ("avg", "best"):
+            data[(g, sel)] = {}
+            for n in names:
+                try:
+                    folds = load_folds(n, clip, samples, sel)
+                except (FileNotFoundError, ValueError) as e:
+                    lines.append(f"- ⚠ {g}/{sel}：{n} 無法讀取（{e}），不列入統計")
+                    continue
+                if sorted(f["fold"] for f in folds) != list(range(5)):
+                    lines.append(f"- ⚠ {g}/{sel}：{n} 只有 fold {[f['fold'] for f in folds]}，不列入統計")
+                    continue
+                data[(g, sel)][n] = folds
+    lines.append("")
+
+    def ts_keys(folds_by_run):
+        return ["ts_pred", "ts_sum"] if folds_by_run and all(is_multi(f) for f in folds_by_run.values()) \
+            else ["ts_pred"]
+
+    key_name = {"ts_pred": "ts_head", "ts_sum": "ts_sum"}
+    summ = {}   # (group, sel, key) -> list of fold_mae_mean per run
+    lines += ["## 1. 各組 TS：每個 run 與三次平均 ± 標準差", ""]
+    for g, _ in groups:
+        for sel in ("avg", "best"):
+            fr = data[(g, sel)]
+            for key in ts_keys(fr):
+                multi_lbl = f"（{key_name[key]}）" if len(ts_keys(fr)) > 1 else ""
+                lines += [f"### {g} · {SEL_NAMES[sel]}{multi_lbl}", "",
+                          "| run | 五折平均 MAE | 平衡 MAE | 斜率 | 10–25 bias | 以人為單位 MAE | Pearson | 贏盲猜折數 |",
+                          "|---|---|---|---|---|---|---|---|"]
+                ms = []
+                for n, folds in fr.items():
+                    m = analyze(folds, key)
+                    ms.append(m)
+                    b = m["bins"]["10-25"]
+                    wins = sum(a < c for a, c in zip(m["fold_mae"], blind_ts))
+                    lines.append(f"| {n} | {m['fold_mae_mean']:.2f} | {m['balanced_mae']:.2f} | {m['slope']:.3f} | "
+                                 f"{b['bias']:+.2f} | {m['subject_mae']:.2f} | {m['pearson']:.3f} | {wins} / 5 |")
+                if ms:
+                    lines.append(f"| **{len(ms)} 次 mean ± std** | **{_msd([m['fold_mae_mean'] for m in ms])}** | "
+                                 f"{_msd([m['balanced_mae'] for m in ms])} | {_msd([m['slope'] for m in ms], '{:.3f}')} | "
+                                 f"{_msd([m['bins']['10-25']['bias'] for m in ms])} | "
+                                 f"{_msd([m['subject_mae'] for m in ms])} | {_msd([m['pearson'] for m in ms], '{:.3f}')} | – |")
+                summ[(g, sel, key)] = ms
+                lines.append("")
+
+    # 2. 各 fold 在三次之間的範圍
+    lines += ["## 2. 各 fold 在三次之間的 MAE 範圍（最小～最大）", ""]
+    for g, _ in groups:
+        for sel in ("avg", "best"):
+            for key in ts_keys(data[(g, sel)]):
+                ms = summ.get((g, sel, key), [])
+                if not ms:
+                    continue
+                fm = np.array([m["fold_mae"] for m in ms])   # (runs, folds)
+                multi_lbl = f"（{key_name[key]}）" if len(ts_keys(data[(g, sel)])) > 1 else ""
+                lines += [f"### {g} · {SEL_NAMES[sel]}{multi_lbl}", "",
+                          "| fold | " + " | ".join(data[(g, sel)].keys()) + " | 最小～最大 | 幅度 | std |",
+                          "|---" * (len(ms) + 4) + "|"]
+                for k in range(fm.shape[1]):
+                    col = fm[:, k]
+                    lines.append(f"| {k} | " + " | ".join(f"{v:.2f}" for v in col) +
+                                 f" | {col.min():.2f}～{col.max():.2f} | {col.max() - col.min():.2f} | {_sd(col):.2f} |")
+                w = int(np.argmax(fm.max(0) - fm.min(0)))
+                lines += ["", f"起伏最大的是 fold {w}（幅度 {fm[:, w].max() - fm[:, w].min():.2f}）。", ""]
+
+    # 3. avg vs best
+    lines += ["## 3. avg vs best（挑模型方式）", "",
+              "| 組 / 輸出 | avg MAE（mean ± std） | best MAE（mean ± std） | avg − best（各 run） | 較穩（std 小） | 較準（mean 小） |",
+              "|---|---|---|---|---|---|"]
+    thr_rows = []
+    for g, _ in groups:
+        for key in ts_keys(data[(g, "avg")]):
+            a = [m["fold_mae_mean"] for m in summ.get((g, "avg", key), [])]
+            b = [m["fold_mae_mean"] for m in summ.get((g, "best", key), [])]
+            if not a or len(a) != len(b):
+                continue
+            lbl = g + (f"（{key_name[key]}）" if len(ts_keys(data[(g, 'avg')])) > 1 else "")
+            lines.append(f"| {lbl} | {_msd(a)} | {_msd(b)} | " + " / ".join(f"{x - y:+.2f}" for x, y in zip(a, b)) +
+                         f" | {'avg' if _sd(a) < _sd(b) else 'best'} | {'avg' if np.mean(a) < np.mean(b) else 'best'} |")
+            thr_rows.append((lbl, _sd(a), _sd(b)))
+    lines += ["", "### 建議的「有意義差距」門檻（2 × 三次標準差）", "",
+              "| 組 / 輸出 | avg：std / 2×std | best：std / 2×std |", "|---|---|---|"]
+    for lbl, sa, sb in thr_rows:
+        lines.append(f"| {lbl} | {sa:.2f} / **{2 * sa:.2f}** | {sb:.2f} / {2 * sb:.2f} |")
+    lines.append("")
+
+    # 4. baseline vs 多任務
+    if len(groups) >= 2:
+        (g0, _), (g1, _) = groups[0], groups[1]
+        lines += [f"## 4. {g0} vs {g1}", "", "### 4.1 TS", "",
+                  "差距門檻 = 2 × 兩組標準差中較大者（保守）；同時列 2 × 合併標準差 sqrt((s1²+s2²)/2)。", "",
+                  f"| 挑模型 | {g1} 輸出 | {g0} MAE | {g1} MAE | 差距（{g1} − {g0}） | 2 × max(std) | 2 × 合併 std | 超過門檻？ |",
+                  "|---|---|---|---|---|---|---|---|"]
+        for sel in ("avg", "best"):
+            a = [m["fold_mae_mean"] for m in summ.get((g0, sel, "ts_pred"), [])]
+            for key in ts_keys(data[(g1, sel)]):
+                b = [m["fold_mae_mean"] for m in summ.get((g1, sel, key), [])]
+                if not a or not b:
+                    continue
+                diff = np.mean(b) - np.mean(a)
+                t1 = 2 * max(_sd(a), _sd(b))
+                t2 = 2 * np.sqrt((_sd(a) ** 2 + _sd(b) ** 2) / 2)
+                lines.append(f"| {sel} | {key_name[key]} | {_msd(a)} | {_msd(b)} | {diff:+.2f} | {t1:.2f} | {t2:.2f} | "
+                             f"{'**是**' if abs(diff) > t1 else ('僅超過合併門檻' if abs(diff) > t2 else '否')} |")
+        lines.append("")
+
+    # 多任務組：PO/CF 與方向
+    for g, _ in groups:
+        for sel in ("avg", "best"):
+            fr = data[(g, sel)]
+            if not fr or not all(is_multi(f) for f in fr.values()):
+                continue
+            lines += [f"### 4.2 {g} · {SEL_NAMES[sel]}：PO / CF（盲猜 = 每折訓練集各動作平均）", "",
+                      "| run | PO MAE | PO 盲猜 | PO Pearson | PO 贏盲猜折數 | CF MAE | CF 盲猜 | CF Pearson | CF 贏盲猜折數 |",
+                      "|---|---|---|---|---|---|---|---|---|"]
+            pc = {}
+            for n, folds in fr.items():
+                r, _ = po_cf_table(n, folds, samples)
+                pc[n] = r
+                lines.append(f"| {n} | " + " | ".join(
+                    f"{r[t]['mae']:.2f} | {r[t]['blind']:.2f} | {r[t]['pearson']:.3f} | "
+                    f"{r[t]['wins']} / 5{' ✓' if r[t]['wins'] == 5 else ''}" for t in ("po", "cf")) + " |")
+            lines.append(f"| **{len(pc)} 次 mean ± std** | " + " | ".join(
+                f"{_msd([pc[n][t]['mae'] for n in pc])} | {_msd([pc[n][t]['blind'] for n in pc])} | "
+                f"{_msd([pc[n][t]['pearson'] for n in pc], '{:.3f}')} | "
+                f"{sum(pc[n][t]['wins'] == 5 for n in pc)} / {len(pc)} run 五折全贏" for t in ("po", "cf")) + " |")
+            lines += ["", f"### 4.3 {g} · {SEL_NAMES[sel]}：哪一類比較嚴重（|PO/15 − CF/35| > {DIR_THRESHOLD:.2f}）", "",
+                      "| run | 子集筆數 | 模型猜對率 | 一律猜多數方向 | 依動作種類猜 | 模型 > 依動作？ | "
+                      "真實 PO 較差：模型猜對 / 依動作猜對 / 筆數 | 真實 CF 較差：模型猜對 / 依動作猜對 / 筆數 |",
+                      "|---|---|---|---|---|---|---|---|"]
+            ds = []
+            for n, folds in fr.items():
+                d = direction_stats(folds, samples)
+                ds.append(d)
+                lines.append(f"| {n} | {d['n']} | {d['acc'] * 100:.1f}% | {d['majority'] * 100:.1f}% | "
+                             f"{d['acc_blind'] * 100:.1f}% | {'✓' if d['acc'] > d['acc_blind'] else '✗'} | "
+                             f"{d['ok_po_low']} / {d['blind_ok_po_low']} / {d['n_po_low']} | "
+                             f"{d['ok_cf_low']} / {d['blind_ok_cf_low']} / {d['n_cf_low']} |")
+            lines += [f"| **{len(ds)} 次 mean ± std** | – | {_msd([d['acc'] * 100 for d in ds], '{:.1f}')} | "
+                      f"{_msd([d['majority'] * 100 for d in ds], '{:.1f}')} | {_msd([d['acc_blind'] * 100 for d in ds], '{:.1f}')} | "
+                      f"{sum(d['acc'] > d['acc_blind'] for d in ds)} / {len(ds)} | – | – |", ""]
+    return lines
+
+
 # ==================== 主程式 ====================
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("names", nargs="+", help="runs/ 底下的 run 名稱")
+    ap.add_argument("names", nargs="*", help="runs/ 底下的 run 名稱")
+    ap.add_argument("--group", action="append", default=[], metavar="組名=run1,run2,...",
+                    help="v5：把多個 run 視為同一設定的重複，可給多次 (第一組為對照組)；需 --pkl")
+    ap.add_argument("--status", default=None, help="--group 時一併列出的 run 狀態檔 (例如 runs/v5_status.txt)")
+    ap.add_argument("--runs_dir", default="runs", help="run 所在的資料夾 (預設 runs)")
     ap.add_argument("--clip", action="store_true", help="事後把所有 run 的預測夾在合理範圍 (TS 10~50)")
     ap.add_argument("--pkl", default=None, help="依 index 從此 pkl 取真實分數 (例如修正後的標籤)，並算盲猜")
     ap.add_argument("--out", default=None, help="輸出 markdown；多個 run 時預設 runs/compare.md")
     args = ap.parse_args()
+    global RUNS_DIR
+    RUNS_DIR = args.runs_dir
+    if not args.names and not args.group:
+        ap.error("請給 run 名稱或 --group")
+
+    if args.group:
+        if not args.pkl:
+            ap.error("--group 需要 --pkl")
+        from dataset import load_kimore
+        samples, _ = load_kimore(args.pkl)
+        groups = []
+        for g in args.group:
+            name, _, runs = g.partition("=")
+            groups.append((name, [r for r in runs.split(",") if r]))
+        text = "\n".join(group_report(groups, samples, args.clip, args.status)) + "\n"
+        print(text)
+        out = args.out or "runs/compare_v5_seeds.md"
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+        with open(out, "w") as f:
+            f.write(text)
+        print(f"已寫入 {out}")
+        return
 
     samples = None
     if args.pkl:

@@ -13,6 +13,10 @@
     多任務 (v4)：--targets ts,po,cf → 同時預測 TS/PO/CF (各自除以滿分正規化)，
     loss = 三個輸出 Huber 的平均；early stopping 仍依驗證集 TS MAE；
     另外報告 ts_sum = clip(PO) + clip(CF) 再 clip 到 [10, 50]。
+
+    v5：--avg_k K (預設 10) → 平均最後 K 個 epoch 的權重並在訓練集重算 BN，存 avg.pt；
+    test_predictions.csv 的 y_pred 為 avg 模型，y_pred_best (與 y_pred_<t>_best) 為 best.pt；
+    metrics.json 主要指標為 avg 模型，"best_model" 為 best.pt 的指標。--avg_k 0 = 舊行為。
     python train_rehab.py --name v4_mt --targets ts,po,cf --pkl data/kimore/processed/kimore_full_pofix.pkl
 ================================================================================
 """
@@ -25,11 +29,12 @@ import json
 import math
 import random
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.optim.swa_utils import update_bn
 from torch.utils.data import DataLoader, Subset
 
 from dataset import (build_dataloaders, RehabDataset, SkeletonAugmentor, predict_windows,
@@ -64,6 +69,8 @@ def parse_args():
                     help="依訓練集 TS 分箱 (5 分一格) 的樣本加權")
     ap.add_argument("--targets", default="ts",
                     help="逗號分隔，例如 ts 或 ts,po,cf；第一個必須是 ts (early stopping 依 TS MAE)")
+    ap.add_argument("--avg_k", type=int, default=10,
+                    help="平均最後 K 個 epoch 的權重 (重算 BN) 當最終模型；0 = 關閉，只用驗證最佳的 best.pt")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--overfit", action="store_true")
     ap.add_argument("--device", default="auto")
@@ -73,6 +80,8 @@ def parse_args():
             or any(t not in SCORE_MAX for t in targets):
         ap.error(f"--targets 需以 ts 開頭、不重複，且只能是 {list(SCORE_MAX)}：{args.targets}")
     args.targets = targets
+    if args.avg_k < 0:
+        ap.error("--avg_k 需 >= 0")
     return args
 
 
@@ -266,6 +275,30 @@ def no_augmentor():
     return SkeletonAugmentor(p_flip=0, yaw_deg=0, scale_range=None, noise_std=0, p_joint_mask=0)
 
 
+# ==================== 權重平均 (last-K) ====================
+def average_state_dicts(states):
+    """逐參數平均多份 state_dict；整數 buffer (num_batches_tracked) 不平均，保留最後一份。"""
+    last = states[-1]
+    out = {}
+    for k, v in last.items():
+        if v.is_floating_point():
+            out[k] = torch.stack([s[k] for s in states]).mean(dim=0).to(v.dtype) if len(states) > 1 else v.clone()
+        else:
+            out[k] = v.clone()
+    return out
+
+
+def recompute_bn(model, loader, device):
+    """在 (不做資料增強的) 訓練集上重算 BatchNorm running mean/var。
+    資料是 dict 格式，update_bn 不能直接吃 DataLoader，包一層只回傳 x；eval 格式 (B,K,3,T,V) 攤平成 (B*K,3,T,V)。"""
+    def xs():
+        for b in loader:
+            x = b["x"]
+            yield x.reshape(-1, *x.shape[2:]) if x.dim() == 5 else x
+    with torch.no_grad():
+        update_bn(xs(), model, device=device)
+
+
 # ==================== 過擬合測試 ====================
 def run_overfit(args, device, n_samples=16, steps=300):
     samples, _ = load_kimore(args.pkl)
@@ -304,6 +337,45 @@ def run_overfit(args, device, n_samples=16, steps=300):
     for t, p in zip(yt, yp):
         print("   " + "  ".join(f"{n}: y={a:6.2f} pred={b:6.2f}" for n, a, b in zip(targets, t, p)))
     return mae
+
+
+# ==================== 測試集評估 ====================
+def test_eval(model, loader, device, args):
+    """回傳 (idx, YT, YP, ts_sum)，YT/YP 為 (N, len(targets)) 原始分數。"""
+    idx, YT, YP = evaluate(model, loader, device, args.clip, args.targets, all_targets=True)
+    return idx, YT, YP, ts_sum_from(YP, args.targets, clip=args.clip)
+
+
+def test_metrics(res, samples, targets, fold, extra_baselines):
+    """由 test_eval 結果算 TS 指標 (+ 多任務的 PO/CF、ts_sum)。"""
+    idx, YT, YP, ts_sum = res
+    yt, yp = YT[:, 0], YP[:, 0]
+    m = regression_metrics(yt, yp)
+    by_ex, by_sub = defaultdict(list), defaultdict(list)
+    for i, t, p in zip(idx, yt, yp):
+        by_ex[samples[i]["exercise"]].append(abs(p - t))
+        by_sub[samples[i]["subgroup"]].append(abs(p - t))
+    subj = [samples[i]["subject_key"] for i in idx]
+    out = {
+        "mae": m["mae"], "rmse": m["rmse"],
+        "mae_norm": m["mae"] / TS_MAX, "rmse_norm": m["rmse"] / TS_MAX,
+        "pearson": m["pearson"], "spearman": spearman(yt, yp),
+        "pred_std": float(np.std(yp)), "true_std": float(np.std(yt)),
+        "per_exercise_mae": {k: float(np.mean(v)) for k, v in sorted(by_ex.items())},
+        "per_subgroup_mae": {k: float(np.mean(v)) for k, v in sorted(by_sub.items())},
+        **range_metrics(yt, yp, subj),
+    }
+    if is_multitask(targets):
+        for k, t in enumerate(targets[1:], start=1):
+            mt = regression_metrics(YT[:, k], YP[:, k])
+            out[t] = {**mt, "mae_norm": mt["mae"] / SCORE_MAX[t],
+                      "baseline_global_mae": float(extra_baselines[t][fold, 0]),
+                      "baseline_per_ex_mae": float(extra_baselines[t][fold, 1])}
+        if ts_sum is not None:
+            ms = regression_metrics(yt, ts_sum)
+            out["ts_sum"] = {**ms, **range_metrics(yt, ts_sum, subj),
+                             "mean_abs_diff_vs_head": float(np.abs(ts_sum - yp).mean())}
+    return out
 
 
 # ==================== 單折 ====================
@@ -348,6 +420,7 @@ def run_fold(args, fold, device, baselines, extra_baselines=None):
                                 "val_rho", "lr", "epoch_sec"])
 
     best_mae, best_ep, bad = float("inf"), 0, 0
+    recent = deque(maxlen=args.avg_k) if args.avg_k > 0 else None   # 最近 K 個 epoch 的權重 (CPU)
     t_start = time.time()
     for ep in range(1, args.epochs + 1):
         t0 = time.time()
@@ -366,6 +439,8 @@ def run_fold(args, fold, device, baselines, extra_baselines=None):
             mark = " *"
         else:
             bad += 1
+        if recent is not None:
+            recent.append({k: v.detach().to("cpu", copy=True) for k, v in model.state_dict().items()})
         print(f"fold {fold} | ep {ep:3d} | loss {loss:.5f} | train MAE {tr_mae:6.3f} | "
               f"val MAE {vm['mae']:6.3f} | val ρ {vm['pearson']:+.3f} | {sec:5.1f}s{mark}", flush=True)
         if bad >= args.patience:
@@ -373,12 +448,31 @@ def run_fold(args, fold, device, baselines, extra_baselines=None):
             break
     train_time = time.time() - t_start
 
+    # 平均最後 K 個 epoch 的權重 → 重算 BN → 驗證 MAE → 存 avg.pt
+    avg_info = None
+    if recent is not None:
+        model.load_state_dict(average_state_dicts(list(recent)))
+        bn_loader = DataLoader(
+            RehabDataset(samples, split["train"], train=False, targets=targets, eval_windows=5,
+                         eval_crop_ratio=0.5, out_frames=100),
+            batch_size=args.batch_size, shuffle=False)
+        recompute_bn(model, bn_loader, device)
+        torch.save(model.state_dict(), os.path.join(out_dir, "avg.pt"))
+        _, yt_v, yp_v = evaluate(model, loaders["val"], device, args.clip, targets)
+        avg_info = {"avg_k": args.avg_k, "avg_n": len(recent),
+                    "avg_epochs": [ep - len(recent) + 1, ep],
+                    "avg_val_mae": regression_metrics(yt_v, yp_v)["mae"]}
+        print(f"fold {fold}: 平均 ep {avg_info['avg_epochs'][0]}–{ep} 共 {len(recent)} 份權重 (BN 已重算)，"
+              f"驗證 MAE {avg_info['avg_val_mae']:.3f} (best ep {best_ep}: {best_mae:.3f})")
+        res_avg = test_eval(model, loaders["test"], device, args)
+
     # 只在這裡用最佳模型跑一次測試集
     model.load_state_dict(torch.load(best_path, map_location=device, weights_only=True))
-    idx, YT, YP = evaluate(model, loaders["test"], device, args.clip, targets, all_targets=True)
-    yt, yp = YT[:, 0], YP[:, 0]
-    ts_sum = ts_sum_from(YP, targets, clip=args.clip)
+    res_best = test_eval(model, loaders["test"], device, args)
+    res = res_avg if avg_info else res_best          # 主要結果：avg 模型 (avg_k=0 時為 best)
 
+    idx, YT, YP, ts_sum = res
+    yt, yp = YT[:, 0], YP[:, 0]
     with open(os.path.join(out_dir, "test_predictions.csv"), "w", newline="") as f:
         w = csv.writer(f)
         extra = []
@@ -386,7 +480,13 @@ def run_fold(args, fold, device, baselines, extra_baselines=None):
             extra += [f"y_true_{t}", f"y_pred_{t}"]
         if ts_sum is not None:
             extra.append("y_pred_ts_sum")
-        w.writerow(["index", "subject_key", "subgroup", "exercise", "y_true", "y_pred"] + extra)
+        best_cols = []
+        if avg_info:
+            best_cols = ["y_pred_best"] + [f"y_pred_{t}_best" for t in targets[1:]] + \
+                        (["y_pred_ts_sum_best"] if ts_sum is not None else [])
+        w.writerow(["index", "subject_key", "subgroup", "exercise", "y_true", "y_pred"] + extra + best_cols)
+        _, _, YPb, tsb = res_best
+        assert res_best[0] == idx
         for r, i in enumerate(idx):
             s = samples[i]
             row = [i, s["subject_key"], s["subgroup"], s["exercise"], f"{yt[r]:.4f}", f"{yp[r]:.4f}"]
@@ -394,22 +494,17 @@ def run_fold(args, fold, device, baselines, extra_baselines=None):
                 row += [f"{YT[r, k]:.4f}", f"{YP[r, k]:.4f}"]
             if ts_sum is not None:
                 row.append(f"{ts_sum[r]:.4f}")
+            if avg_info:
+                row += [f"{YPb[r, k]:.4f}" for k in range(len(targets))]
+                if tsb is not None:
+                    row.append(f"{tsb[r]:.4f}")
             w.writerow(row)
 
-    m = regression_metrics(yt, yp)
-    by_ex, by_sub = defaultdict(list), defaultdict(list)
-    for i, t, p in zip(idx, yt, yp):
-        by_ex[samples[i]["exercise"]].append(abs(p - t))
-        by_sub[samples[i]["subgroup"]].append(abs(p - t))
+    tm = test_metrics(res, samples, targets, fold, extra_baselines)
+    m = tm
     metrics = {
         "fold": fold,
-        "mae": m["mae"], "rmse": m["rmse"],
-        "mae_norm": m["mae"] / TS_MAX, "rmse_norm": m["rmse"] / TS_MAX,
-        "pearson": m["pearson"], "spearman": spearman(yt, yp),
-        "pred_std": float(np.std(yp)), "true_std": float(np.std(yt)),
-        "per_exercise_mae": {k: float(np.mean(v)) for k, v in sorted(by_ex.items())},
-        "per_subgroup_mae": {k: float(np.mean(v)) for k, v in sorted(by_sub.items())},
-        **range_metrics(yt, yp, [samples[i]["subject_key"] for i in idx]),
+        **{k: v for k, v in tm.items() if k not in targets[1:] and k != "ts_sum"},
         "reweight_bins": w_stats,
         "best_epoch": best_ep, "best_val_mae": best_mae, "epochs_run": ep,
         "train_time_sec": train_time,
@@ -419,16 +514,13 @@ def run_fold(args, fold, device, baselines, extra_baselines=None):
         "n_test": len(yt),
         "args": vars(args),
     }
-    if multi:
-        for k, t in enumerate(targets[1:], start=1):
-            mt = regression_metrics(YT[:, k], YP[:, k])
-            metrics[t] = {**mt, "mae_norm": mt["mae"] / SCORE_MAX[t],
-                          "baseline_global_mae": float(extra_baselines[t][fold, 0]),
-                          "baseline_per_ex_mae": float(extra_baselines[t][fold, 1])}
-        if ts_sum is not None:
-            ms = regression_metrics(yt, ts_sum)
-            metrics["ts_sum"] = {**ms, **range_metrics(yt, ts_sum, [samples[i]["subject_key"] for i in idx]),
-                                 "mean_abs_diff_vs_head": float(np.abs(ts_sum - yp).mean())}
+    for k in list(targets[1:]) + ["ts_sum"]:
+        if k in tm:
+            metrics[k] = tm[k]
+    if avg_info:
+        metrics.update(avg_info)
+        metrics["selection"] = "avg"
+        metrics["best_model"] = test_metrics(res_best, samples, targets, fold, extra_baselines)
     with open(metrics_path, "w") as f:
         json.dump(metrics, f, indent=2, ensure_ascii=False)
     if multi:
@@ -439,6 +531,8 @@ def run_fold(args, fold, device, baselines, extra_baselines=None):
     print(f"fold {fold} test | MAE {m['mae']:.3f} | RMSE {m['rmse']:.3f} | ρ {m['pearson']:+.3f} | "
           f"pred std {metrics['pred_std']:.2f} | baseline(依動作) {baselines[fold, 1]:.3f} | "
           f"best ep {best_ep} | {train_time / 60:.1f} 分鐘")
+    if avg_info:
+        print(f"fold {fold} test | best 模型 MAE {metrics['best_model']['mae']:.3f} vs avg 模型 MAE {m['mae']:.3f}")
     return metrics
 
 
@@ -476,18 +570,25 @@ def range_table(rows):
 
 
 def write_summary(args, results):
-    lines = [f"# {args.name}", "",
-             "| Fold | Baseline（依動作）MAE | 模型 MAE | 模型 RMSE | Pearson ρ | 預測 std | 贏過 baseline？ |",
-             "|---|---|---|---|---|---|---|"]
+    has_avg = all("best_model" in r for r in results)
+    lines = [f"# {args.name}", ""]
+    if has_avg:
+        lines += [f"模型 = 平均最後 {results[0]['avg_k']} 個 epoch 的權重（BN 重算）；"
+                  "「best 模型 MAE」= 驗證 MAE 最低的 epoch（best.pt）。", ""]
+    lines += ["| Fold | Baseline（依動作）MAE | 模型 MAE | 模型 RMSE | Pearson ρ | 預測 std | 贏過 baseline？ |" +
+              (" best 模型 MAE |" if has_avg else ""),
+              "|---|---|---|---|---|---|---|" + ("---|" if has_avg else "")]
     for r in results:
         win = r["mae"] < r["baseline_per_ex_mae"]
         lines.append(f"| {r['fold']} | {r['baseline_per_ex_mae']:.2f} | {r['mae']:.2f} | {r['rmse']:.2f} | "
-                     f"{r['pearson']:.3f} | {r['pred_std']:.2f} | {'✓' if win else '✗'} |")
+                     f"{r['pearson']:.3f} | {r['pred_std']:.2f} | {'✓' if win else '✗'} |" +
+                     (f" {r['best_model']['mae']:.2f} |" if has_avg else ""))
     wins = sum(r["mae"] < r["baseline_per_ex_mae"] for r in results)
     lines.append(f"| mean ± std | {_ms([r['baseline_per_ex_mae'] for r in results])} | "
                  f"{_ms([r['mae'] for r in results])} | {_ms([r['rmse'] for r in results])} | "
                  f"{_ms([r['pearson'] for r in results], '{:.3f}')} | {_ms([r['pred_std'] for r in results])} | "
-                 f"{wins} / {len(results)} 折 |")
+                 f"{wins} / {len(results)} 折 |" +
+                 (f" {_ms([r['best_model']['mae'] for r in results])} |" if has_avg else ""))
 
     for title, key in [("各動作 MAE", "per_exercise_mae"), ("各子組 MAE", "per_subgroup_mae")]:
         cols = sorted({c for r in results for c in r[key]})
