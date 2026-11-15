@@ -46,7 +46,7 @@
     校準後：原點 = 開頭幾幀的 SpineBase 平均位置；左右髖連線對齊 X 軸；
             長度單位 = 「SpineBase → SpineShoulder」軀幹長 (約 0.5 m)。
 
-【輸出】data/kimore/processed/kimore_full_v3.pkl (--no_fix: kimore_full_v3_nofix.pkl)
+【輸出】data/kimore/processed/kimore_full_v3_1.pkl (--no_fix: kimore_full_v3_1_nofix.pkl)；v3 檔不覆蓋
     {
       "meta":    {...版本、關節名稱、左右對稱表、校準參數...},
       "samples": [ {
@@ -73,8 +73,9 @@ import pandas as pd
 # ==================== 路徑與參數設定 ====================
 RAW_DATA_DIR = "./data/kimore/raw"
 PROCESSED_DIR = "./data/kimore/processed"
-OUTPUT_NAME = "kimore_full_v3.pkl"         # v3 選檔/讀檔規則 + fix_scores()
-OUTPUT_NAME_NOFIX = "kimore_full_v3_nofix.pkl"   # --no_fix：v3 規則、原始標籤
+OUTPUT_NAME = "kimore_full_v3_1.pkl"       # v3.1 = v3 + VERIFIED_START_TRIMS；fix_scores()
+OUTPUT_NAME_NOFIX = "kimore_full_v3_1_nofix.pkl"   # --no_fix：v3.1 規則、原始標籤
+# kimore_full_v3.pkl (v3，無開頭裁切) 不覆蓋，v6 run 的 index 對應以它為準
 # 舊檔 kimore_full_pofix.pkl / kimore_full.pkl (v2 規則) 不覆蓋，舊 run 的 index 對應仍以它們為準
 PO_MIN = 3.0                               # EAAQ：PO 三題各 1–5 分
 LABEL_FIX_NOTE = "PO<3 set to 3 per KIMORE author (L. Romeo, 2026-11-13); TS recomputed as PO+CF"
@@ -138,6 +139,22 @@ def _rows_to_bodies(line):
         v = np.asarray(cells[k * 100:(k + 1) * 100], dtype=np.float64).reshape(25, 4)
         out.append(v[:, :3])
     return out
+
+
+# 開頭受試者還在走向定位的錄影：從定位後的靜止預備姿勢開始。
+# 原因：body_centric_alignment 用開頭 REF_FRAMES 幀定原點，走位中的開頭會讓整段動作偏離原點
+# (這兩筆偏移 1.7 / 1.55 軀幹長，全部樣本中位數 0.04、第 99 百分位 0.53)。
+# key = 動作；值 = (選用檔名, 起始幀, 理由)。起始幀以 load_joint_positions 輸出 (已去掉開頭空行) 的索引計，
+# 理由中的「行」為 CSV 行號 (1 起算)。選用檔名不符時直接報錯，避免選檔規則改變後裁錯檔。
+VERIFIED_START_TRIMS = {
+    "Parkinson/P_ID3/Es1": ("JointPosition060616_120220.csv", 390,
+                            "行 20–399 受試者從離鏡頭 1.7 m 處往後、往左走到 2.55 m 定位 (水平移動約 0.9 m)；"
+                            "行 400–455 定位後雙手下垂靜止，行 457 起開始舉手 (共 7 次)。從行 410 (幀 390) 開始，"
+                            "保留約 1.5 秒預備姿勢 (全部 Es1 第一次舉手的中位數為第 45 幀)"),
+    "Stroke/S_ID1/Es1": ("JointPosition060616_122123.csv", 530,
+                         "行 31–560 受試者分多步從 2.54 m 退到 3.3 m 定位；行 561 起位置穩定 (距最終位置 < 0.05 m)，"
+                         "雙手下垂直到約行 630 才開始動作。從行 561 (幀 530) 開始"),
+}
 
 
 def load_joint_positions(csv_path: str, max_dropped: int = MAX_DROPPED):
@@ -428,6 +445,16 @@ def run_preprocessing(raw_dir: str = RAW_DATA_DIR, out_dir: str = PROCESSED_DIR,
             skel, skel_info, choice = select_joint_position(csv_candidates, 10 ** 9 if verified else MAX_DROPPED)
             if verified:
                 notes.append(f"人工確認後保留最長連續段：{verified}")
+            start_trim = VERIFIED_START_TRIMS.get(tag)
+            if start_trim:
+                fname, start, why = start_trim
+                if choice["chosen"] != fname:
+                    raise ValueError(f"VERIFIED_START_TRIMS 預期 {fname}，實際選到 {choice['chosen']}")
+                if start >= skel.shape[0] - MIN_FRAMES:
+                    raise ValueError(f"VERIFIED_START_TRIMS 起始幀 {start} 超過長度 {skel.shape[0]}")
+                skel = skel[start:]
+                skel_info = {**skel_info, "start_trim": start, "frames": int(skel.shape[0])}
+                notes.append(f"人工確認後去掉開頭走位 {start} 幀：{why}")
         except Exception as e:
             skipped["骨架異常"].append(f"{tag} ({e})")
             continue
@@ -485,14 +512,15 @@ def run_preprocessing(raw_dir: str = RAW_DATA_DIR, out_dir: str = PROCESSED_DIR,
 
     payload = {
         "meta": {
-            "version": 3,
+            "version": 3.1,
             "layout": "(C=3, T_orig, V=25)",
             "joint_names": JOINT_NAMES,
             "flip_pairs": FLIP_PAIRS,
             "unit": "SpineBase→SpineShoulder torso length",
             "ref_frames": REF_FRAMES,
             "selection_rule": "JointPosition: dedupe identical copies, drop unusable, take latest timestamp; "
-                              "labels: only ClinicalAssessment_<subject>*.xlsx",
+                              "labels: only ClinicalAssessment_<subject>*.xlsx; "
+                              "v3.1: VERIFIED_START_TRIMS drops pre-exercise walk-in at recording start",
             "skipped": {k: list(v) for k, v in skipped.items()},
             "notes": [{"tag": t, "notes": n} for t, n in issues],
         },
@@ -567,5 +595,5 @@ if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--no_fix", action="store_true",
-                    help="不套用 PO<3 修正，輸出原始標籤的 kimore_full_v3_nofix.pkl")
+                    help="不套用 PO<3 修正，輸出原始標籤的 kimore_full_v3_1_nofix.pkl")
     run_preprocessing(apply_fix=not ap.parse_args().no_fix)
