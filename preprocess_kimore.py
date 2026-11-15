@@ -28,7 +28,17 @@
     經 KIMORE 作者 (L. Romeo, 2026-11-13) 確認：補成 3 (不刪除)，TS 重算為 PO + CF。
     每筆樣本帶 sample["label_fix"] = {"po_orig", "ts_orig"} 或 None；meta["label_fixes"] 彙整。
     其他不一致 (例如 Expert/E_ID4 Es5 的 TS 與 PO+CF 差 0.67) 一律不動。
-    預設輸出 kimore_full_pofix.pkl；加 --no_fix 才輸出未修正的 kimore_full.pkl (重現舊結果用)。
+    v2 時輸出 kimore_full_pofix.pkl (--no_fix: kimore_full.pkl)。
+
+【v3 資料正確性修正】(逐檔檢查 400 個 JointPosition 檔、所有 ClinicalAssessment 檔)
+1. [Bug] 標籤檔：v2 取排序後第一個 ClinicalAssessment*.xlsx，E_ID3 的 Es3/Es4/Es5 資料夾混有
+   ClinicalAssessment_E_ID1.xlsx，因此讀到 E_ID1 的分數。v3 只用檔名屬於本人的檔，多個時內容須相同。
+2. [Bug] 多個骨架檔：v2 取排序後第一個 (S_ID5/Es1 讀到 68 幀的中斷錄影；P_ID3/Es1 第一個檔壞掉整筆被跳過)。
+   v3：去除內容相同的 "(1)" 複本 → 排除不合格的檔 → 取錄影時間最晚的合格檔；長度相近的候選標記為無法確定。
+3. [Bug] 多人幀：一行 200 欄 = 同一幀追蹤到兩個人。v2 直接讀檔失敗，整筆跳過 (E_ID8/Es1、P_ID5/Es1、S_ID6/Es5)。
+   v3 依位置選受試者那一具。
+4. [Bug] 中段空行 (追蹤中斷)：v2 經 pandas 直接略過，時間軸被壓縮。v3 只保留最長連續段 (丟掉的都是開頭 3~10 幀的零星偵測)。
+5. 每筆樣本記錄 source_file、skeleton_info、ambiguous_source、notes；meta 記錄跳過原因與備註。
 
 --------------------------------------------------------------------------------
 【座標系說明】(Kinect v2 camera space，單位公尺)
@@ -36,7 +46,7 @@
     校準後：原點 = 開頭幾幀的 SpineBase 平均位置；左右髖連線對齊 X 軸；
             長度單位 = 「SpineBase → SpineShoulder」軀幹長 (約 0.5 m)。
 
-【輸出】data/kimore/processed/kimore_full_pofix.pkl (--no_fix: kimore_full.pkl)
+【輸出】data/kimore/processed/kimore_full_v3.pkl (--no_fix: kimore_full_v3_nofix.pkl)
     {
       "meta":    {...版本、關節名稱、左右對稱表、校準參數...},
       "samples": [ {
@@ -63,8 +73,9 @@ import pandas as pd
 # ==================== 路徑與參數設定 ====================
 RAW_DATA_DIR = "./data/kimore/raw"
 PROCESSED_DIR = "./data/kimore/processed"
-OUTPUT_NAME = "kimore_full_pofix.pkl"      # 套用 fix_scores()
-OUTPUT_NAME_NOFIX = "kimore_full.pkl"      # --no_fix：原始標籤 (v2 結果)
+OUTPUT_NAME = "kimore_full_v3.pkl"         # v3 選檔/讀檔規則 + fix_scores()
+OUTPUT_NAME_NOFIX = "kimore_full_v3_nofix.pkl"   # --no_fix：v3 規則、原始標籤
+# 舊檔 kimore_full_pofix.pkl / kimore_full.pkl (v2 規則) 不覆蓋，舊 run 的 index 對應仍以它們為準
 PO_MIN = 3.0                               # EAAQ：PO 三題各 1–5 分
 LABEL_FIX_NOTE = "PO<3 set to 3 per KIMORE author (L. Romeo, 2026-11-13); TS recomputed as PO+CF"
 
@@ -93,32 +104,173 @@ XYZ_INDICES = [j * 4 + k for j in range(25) for k in range(3)]
 
 
 # ==================== 1. 讀取骨架 ====================
-def load_joint_positions(csv_path: str) -> np.ndarray:
-    """讀取 JointPosition.csv，回傳 (T, 25, 3) float32；失敗時丟出 ValueError。"""
-    df = pd.read_csv(csv_path, header=None)
-    if df.shape[1] < 100:
-        raise ValueError(f"欄位數僅 {df.shape[1]} < 100")
+# JointPosition CSV 格式 (逐行檢查 400 個檔得到)：
+#   - 每行一幀；每具骨架 25 關節 × [X, Y, Z, TrackingState] = 100 欄，行尾多一個逗號。
+#   - 空行 = 該幀沒有追蹤到人 (錄影開頭常見)。pandas 會直接略過空行，若空行在序列中間會把時間軸壓縮。
+#   - 一行 200 / 300 欄 = 同一幀追蹤到 2 / 3 個人 (TimeStamp 同一行也有相同的 2 個時間戳)，
+#     例如治療師走進畫面。受試者 = SpineBase 水平位置與單人幀一致的那一具；骨架順序不固定。
+#   - 單人幀也不一定是受試者：P_ID5/Es1 有約 11 秒受試者沒被追蹤到、只追蹤到走向鏡頭的路人；
+#     S_ID2/Es5 結尾也有一段換成別人。換人的特徵是 SpineBase 瞬間跳動，而不是離中心多遠
+#     (受試者開頭走到定位、坐姿追蹤抖動都會偏離中心但連續)。
+#     因此依幀間連續性把骨架串成軌跡，幀數最多的軌跡 = 受試者，其他軌跡的幀視為缺幀。
+TRACK_JUMP = 0.50        # 相鄰 (有骨架的) 幀之間 SpineBase 水平 (x, z) 移動超過此值 (公尺) 視為不同人
+MAX_DROPPED = 30         # 中段斷掉時只保留最長連續段；丟掉的幀數超過此值就排除該錄影
+# 人工逐幀確認過「最長連續段已包含完整動作、丟掉的部分沒有動作」的錄影，允許超過 MAX_DROPPED。
+# 新出現的同類情況仍會被排除，需人工確認後再加進來。
+VERIFIED_TRIMS = {
+    "Parkinson/P_ID5/Es1": "行 1018–1353 只追蹤到走向鏡頭的路人；保留段 (行 18–1017) 有完整 5 次舉手，"
+                           "受試者回到畫面後 (行 1354–1543) 雙手一直舉著、沒有新的重複",
+    "Stroke/S_ID2/Es5": "行 549–566 為路人；之後 86 幀受試者站立 (無下蹲) 並往左走出畫面，動作已在保留段 (行 64–548) 結束",
+}
 
-    xyz = df.iloc[:, XYZ_INDICES].apply(pd.to_numeric, errors="coerce")
-    vals = xyz.values.astype(np.float64)
+
+def _rows_to_bodies(line):
+    """一行 → list[(25, 3) ndarray]；空行回傳 []。欄位數不是 100 的倍數 (去掉行尾空欄) 時丟出 ValueError。"""
+    cells = line.strip().split(",")
+    while cells and cells[-1] == "":
+        cells.pop()
+    if not cells:
+        return []
+    if len(cells) % 100:
+        raise ValueError(f"欄位數 {len(cells)} 不是 100 的倍數")
+    out = []
+    for k in range(len(cells) // 100):
+        v = np.asarray(cells[k * 100:(k + 1) * 100], dtype=np.float64).reshape(25, 4)
+        out.append(v[:, :3])
+    return out
+
+
+def load_joint_positions(csv_path: str, max_dropped: int = MAX_DROPPED):
+    """
+    讀取 JointPosition.csv，回傳 ((T, 25, 3) float32, info)；無法使用時丟出 ValueError。
+    1. 逐行讀，空行記為缺幀 (保留時間位置)，多人幀先全部保留。
+    2. 軌跡追蹤：每具骨架接到「最後位置水平距離最近且 < TRACK_JUMP」的軌跡 (同一幀不重複)，否則開新軌跡；
+       軌跡不會過期 (受試者中斷後回到原位會接回)。幀數最多的軌跡 = 受試者，其他幀視為缺幀。
+    3. 去掉頭尾缺幀；中段若有缺幀，只保留最長的連續段 (不跨大段空白內插、也不壓縮時間)，
+       丟掉的幀數 > MAX_DROPPED 時排除。
+    4. 全 0 的幀 (追蹤失敗) 沿用舊作法：比例 > MAX_ZERO_RATIO 排除，否則線性內插。
+    """
+    with open(csv_path, newline="") as f:
+        lines = f.read().replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    frames = []
+    for i, line in enumerate(lines):
+        try:
+            frames.append(_rows_to_bodies(line))
+        except ValueError as e:
+            raise ValueError(f"第 {i + 1} 行：{e}")
+    if not any(frames):
+        raise ValueError("沒有任何骨架幀")
+    # 軌跡追蹤 → 幀數最多的軌跡為受試者
+    n_multi = sum(len(b) > 1 for b in frames)
+    tracks = []                       # 每條軌跡: {"last": (x, z), "frames": {幀: 骨架}}
+    for i, b in enumerate(frames):
+        pos = [x[SPINE_BASE][[0, 2]] for x in b]
+        pairs = sorted((float(np.linalg.norm(p - t["last"])), j, k)
+                       for j, p in enumerate(pos) for k, t in enumerate(tracks))
+        used_b, used_t = set(), set()
+        for d, j, k in pairs:
+            if d < TRACK_JUMP and j not in used_b and k not in used_t:
+                tracks[k]["frames"][i] = b[j]
+                tracks[k]["last"] = pos[j]
+                used_b.add(j)
+                used_t.add(k)
+        for j in range(len(b)):
+            if j not in used_b:
+                tracks.append({"last": pos[j], "frames": {i: b[j]}})
+    main = max(tracks, key=lambda t: len(t["frames"]))
+    n_other_tracks = len(tracks) - 1
+    picked = [main["frames"].get(i) for i in range(len(frames))]
+    n_off = sum(1 for i, b in enumerate(frames) if b and picked[i] is None)   # 有骨架但不是受試者的幀
+    have = [i for i, b in enumerate(picked) if b is not None]
+    if not have:
+        raise ValueError("沒有任何幀是受試者")
+    n_off_inside = sum(1 for i in range(have[0], have[-1] + 1)
+                       if picked[i] is None and frames[i])      # 頭尾以外的非受試者幀
+    picked = picked[have[0]:have[-1] + 1]
+
+    # 中段缺幀 → 切段，保留最長連續段
+    segs, cur = [], []
+    for i, b in enumerate(picked):
+        if b is not None:
+            cur.append(i)
+        elif cur:
+            segs.append(cur)
+            cur = []
+    if cur:
+        segs.append(cur)
+    keep = max(segs, key=len)
+    n_gap = len(picked) - sum(len(sg) for sg in segs)
+    dropped = sum(len(sg) for sg in segs) - len(keep)
+    if dropped > max_dropped:
+        raise ValueError(f"中段追蹤中斷 {n_gap} 幀 (其中非受試者 {n_off_inside} 幀)，"
+                         f"最長連續段 {len(keep)} 幀之外還有 {dropped} 幀 (> {max_dropped})")
+    picked = [picked[i] for i in keep]
+    vals = np.stack(picked).reshape(len(picked), -1)
 
     # Kinect 追蹤失敗時整幀為 0 → 視為缺值
     zero_rows = np.all(np.abs(vals) < 1e-8, axis=1)
     if zero_rows.mean() > MAX_ZERO_RATIO:
         raise ValueError(f"追蹤失敗幀比例 {zero_rows.mean():.0%} 過高")
     vals[zero_rows] = np.nan
-
-    # 沿時間軸線性內插補缺值，頭尾用最近值補
     vals = (pd.DataFrame(vals)
             .interpolate(method="linear", limit_direction="both", axis=0)
             .bfill().ffill().values)
-
     if np.isnan(vals).any():
         raise ValueError("補值後仍含 NaN")
     T = vals.shape[0]
     if T < MIN_FRAMES:
         raise ValueError(f"幀數 {T} < {MIN_FRAMES}")
-    return vals.reshape(T, 25, 3).astype(np.float32)
+    info = {"frames": T, "gap_frames": n_gap, "dropped_frames": dropped, "multi_body_frames": n_multi,
+            "off_subject_frames": n_off, "other_tracks": n_other_tracks, "zero_frames": int(zero_rows.sum())}
+    return vals.reshape(T, 25, 3).astype(np.float32), info
+
+
+_STAMP = re.compile(r"(\d{2})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})")
+
+
+def _stamp_key(path):
+    """檔名中的 DDMMYY_HHMMSS → 可排序的 (YY, MM, DD, hh, mm, ss)；沒有時間戳回傳 None。"""
+    m = _STAMP.search(os.path.basename(path))
+    if not m:
+        return None
+    d, mo, y, h, mi, se = (int(g) for g in m.groups())
+    return (y, mo, d, h, mi, se)
+
+
+def select_joint_position(csv_paths, max_dropped: int = MAX_DROPPED):
+    """
+    一個動作資料夾內有多個 JointPosition 檔時的選檔規則：
+      1. 內容逐位元相同的檔 (例如 "xxx(1).csv" 複本) 只留一份；
+      2. 每個檔各自讀取，讀不了 / 不合格的排除；
+      3. 合格的檔中取**錄影時間最晚**的一個 (前面的視為中斷或重錄)。
+    回傳 (skeleton, info, choice)；choice 記錄所有候選與理由。全部不合格時丟出 ValueError。
+    """
+    import filecmp
+    uniq = []
+    for p in sorted(csv_paths):
+        if not any(filecmp.cmp(p, q, shallow=False) for q in uniq):
+            uniq.append(p)
+    dup = sorted(set(csv_paths) - set(uniq))
+    cands = []
+    for p in uniq:
+        try:
+            skel, info = load_joint_positions(p, max_dropped)
+            cands.append({"file": os.path.basename(p), "ok": True, "frames": info["frames"],
+                          "_skel": skel, "_info": info, "_key": _stamp_key(p)})
+        except Exception as e:
+            cands.append({"file": os.path.basename(p), "ok": False, "error": str(e), "_key": _stamp_key(p)})
+    good = [c for c in cands if c["ok"]]
+    if not good:
+        raise ValueError("; ".join(f"{c['file']}: {c['error']}" for c in cands))
+    if len(good) > 1 and any(c["_key"] is None for c in good):
+        raise ValueError(f"多個合格骨架檔但無法從檔名判斷錄影時間：{[c['file'] for c in good]}")
+    best = max(good, key=lambda c: c["_key"] or ())
+    # 有兩個以上合格檔、且較早的檔長度不到最晚檔的一半以下 → 很可能只是中斷；否則標記為「無法確定」
+    ambiguous = [c["file"] for c in good if c is not best and c["frames"] >= 0.5 * best["frames"]]
+    choice = {"chosen": best["file"], "duplicates_removed": [os.path.basename(p) for p in dup],
+              "candidates": [{k: v for k, v in c.items() if not k.startswith("_")} for c in cands],
+              "ambiguous_with": ambiguous}
+    return best["_skel"], best["_info"], choice
 
 
 # ==================== 2. 整段序列共用參數的幾何校準 ====================
@@ -175,21 +327,43 @@ def _to_float(val):
         return None
 
 
-def parse_clinical_scores(label_dir: str, ex_num: int):
+def label_files_for(label_dir: str, subject: str):
     """
-    從 ClinicalAssessment_*.xlsx 讀取第 ex_num 個動作的 TS / PO / CF。
+    資料夾內屬於 subject 的 ClinicalAssessment 檔 (檔名 ClinicalAssessment_<subject>.xlsx 或 ..._<subject>(n).xlsx)。
+    其他受試者的檔 (例如 E_ID3/Es3 裡混進的 ClinicalAssessment_E_ID1.xlsx) 一律不用。
+    回傳 (屬於本人的檔, 其他人的檔)。
+    """
+    own, other = [], []
+    for p in sorted(glob.glob(os.path.join(label_dir, "ClinicalAssessment*.xlsx"))):
+        m = re.fullmatch(r"ClinicalAssessment_(.+?)(\(\d+\))?\.xlsx", os.path.basename(p))
+        (own if m and m.group(1) == subject else other).append(p)
+    return own, other
+
+
+def parse_clinical_scores(label_dir: str, ex_num: int, subject: str, notes=None):
+    """
+    從屬於 subject 的 ClinicalAssessment_*.xlsx 讀取第 ex_num 個動作的 TS / PO / CF。
     欄位名稱如 "clinical TS Ex#1"，清理後為 "clinicaltsex#1"。
+    本人有多個檔 (例如 "(1)" 複本) 時，內容必須相同，否則丟出 ValueError。
+    表內 "Subject ID" 欄與受試者不符時只記錄在 notes (已確認 NE_ID2、E_ID16/Es2 只是該欄填錯，分數是本人的)。
     回傳 dict(ts=..., po=..., cf=...)；讀不到 TS 時回傳 None。
     """
-    xlsx_files = sorted(glob.glob(os.path.join(label_dir, "ClinicalAssessment*.xlsx")))
-    if not xlsx_files:
+    notes = notes if notes is not None else []
+    own, other = label_files_for(label_dir, subject)
+    if other:
+        notes.append(f"忽略其他受試者的標籤檔 {[os.path.basename(p) for p in other]}")
+    if not own:
         return None
-    if len(xlsx_files) > 1:
-        print(f"   ⚠️ {label_dir} 有多個 ClinicalAssessment 檔，使用 {os.path.basename(xlsx_files[0])}")
-
-    df = pd.read_excel(xlsx_files[0])
+    dfs = [pd.read_excel(p) for p in own]
+    if any(not d.equals(dfs[0]) for d in dfs[1:]):
+        raise ValueError(f"本人有多個內容不同的標籤檔 {[os.path.basename(p) for p in own]}")
+    if len(own) > 1:
+        notes.append(f"本人有 {len(own)} 個內容相同的標籤檔")
+    df = dfs[0]
     if df.empty:
         return None
+    if "Subject ID" in df.columns and str(df["Subject ID"].iloc[0]).strip() != subject:
+        notes.append(f"標籤檔內 Subject ID 寫成 {str(df['Subject ID'].iloc[0]).strip()} (檔名為本人，使用其分數)")
 
     scores = {}
     for col in df.columns:
@@ -228,7 +402,7 @@ def run_preprocessing(raw_dir: str = RAW_DATA_DIR, out_dir: str = PROCESSED_DIR,
     exercise_dirs = sorted(glob.glob(os.path.join(raw_dir, "*", "*", "*", "[Ee][Ss][1-5]")))
     print(f"🔍 總共找到 {len(exercise_dirs)} 個動作資料夾。")
 
-    samples, skipped = [], defaultdict(list)
+    samples, skipped, issues = [], defaultdict(list), []
 
     for ex_dir in exercise_dirs:
         parts = os.path.normpath(ex_dir).split(os.sep)
@@ -237,26 +411,40 @@ def run_preprocessing(raw_dir: str = RAW_DATA_DIR, out_dir: str = PROCESSED_DIR,
         ex_num = int(exercise[-1])
         tag = f"{subgroup}/{subject}/{exercise}"
 
-        csv_candidates = sorted(glob.glob(os.path.join(ex_dir, "Raw", "*[Jj]oint[Pp]osition*.csv")))
-        if not csv_candidates:
-            skipped["缺 JointPosition.csv"].append(tag)
-            continue
-        if len(csv_candidates) > 1:
-            print(f"   ⚠️ {tag} 有 {len(csv_candidates)} 個 JointPosition 檔，使用第一個")
-
+        notes = []
         try:
-            skel = load_joint_positions(csv_candidates[0])
-        except Exception as e:
-            skipped[f"骨架異常"].append(f"{tag} ({e})")
-            continue
-
-        try:
-            labels = parse_clinical_scores(os.path.join(ex_dir, "Label"), ex_num)
+            labels = parse_clinical_scores(os.path.join(ex_dir, "Label"), ex_num, subject, notes)
         except Exception as e:
             labels = None
-            print(f"   ❌ {tag} 讀取評分失敗: {e}")
+            notes.append(f"讀取評分失敗: {e}")
+        csv_candidates = sorted(glob.glob(os.path.join(ex_dir, "Raw", "*[Jj]oint[Pp]osition*.csv")))
+        if not csv_candidates:
+            raw_files = sorted(os.listdir(os.path.join(ex_dir, "Raw"))) if os.path.isdir(os.path.join(ex_dir, "Raw")) else []
+            skipped["缺 JointPosition.csv"].append(
+                f"{tag} (Raw 內: {', '.join(raw_files) or '空'}；{'有' if labels else '無'}評分)")
+            continue
+        try:
+            verified = VERIFIED_TRIMS.get(tag)
+            skel, skel_info, choice = select_joint_position(csv_candidates, 10 ** 9 if verified else MAX_DROPPED)
+            if verified:
+                notes.append(f"人工確認後保留最長連續段：{verified}")
+        except Exception as e:
+            skipped["骨架異常"].append(f"{tag} ({e})")
+            continue
+        if len(csv_candidates) > 1:
+            cs = ", ".join(f"{c['file']}({c['frames']} 幀)" if c["ok"] else f"{c['file']}(不合格: {c['error'][:40]})"
+                           for c in choice["candidates"])
+            notes.append(f"多個骨架檔 → 選 {choice['chosen']}；候選 {cs}" +
+                         (f"；已去除相同複本 {choice['duplicates_removed']}" if choice["duplicates_removed"] else "") +
+                         (f"；**無法確定**：{choice['ambiguous_with']} 長度相近" if choice["ambiguous_with"] else ""))
+        if skel_info["dropped_frames"] or skel_info["gap_frames"]:
+            notes.append(f"中段追蹤中斷 {skel_info['gap_frames']} 幀，保留最長連續段，丟掉 {skel_info['dropped_frames']} 幀")
+        if skel_info["multi_body_frames"]:
+            notes.append(f"{skel_info['multi_body_frames']} 幀同時追蹤到多人，依水平位置選受試者")
+        if skel_info["off_subject_frames"]:
+            notes.append(f"{skel_info['off_subject_frames']} 幀追蹤到的不是受試者 (SpineBase 瞬間跳動 > {TRACK_JUMP} m 的其他軌跡)，視為缺幀")
         if labels is None:
-            skipped["缺評分"].append(tag)
+            skipped["缺評分"].append(tag + (f" ({'; '.join(notes)})" if notes else ""))
             continue
 
         aligned, params = body_centric_alignment(skel)
@@ -277,21 +465,36 @@ def run_preprocessing(raw_dir: str = RAW_DATA_DIR, out_dir: str = PROCESSED_DIR,
             "po": labels["po"],
             "cf": labels["cf"],
             "align_params": params,
+            "source_file": choice["chosen"],
+            "skeleton_info": skel_info,
+            "ambiguous_source": choice["ambiguous_with"],
+            "notes": notes,
         }
         if apply_fix:
             sample = fix_scores(sample)
         samples.append(sample)
+        if notes:
+            issues.append((tag, notes))
 
     report(samples, skipped)
+    print(f"\n📝 有備註的樣本 {len(issues)} 筆：")
+    for tag, ns in issues:
+        print(f"   {tag}")
+        for n in ns:
+            print(f"      - {n}")
 
     payload = {
         "meta": {
-            "version": 2,
+            "version": 3,
             "layout": "(C=3, T_orig, V=25)",
             "joint_names": JOINT_NAMES,
             "flip_pairs": FLIP_PAIRS,
             "unit": "SpineBase→SpineShoulder torso length",
             "ref_frames": REF_FRAMES,
+            "selection_rule": "JointPosition: dedupe identical copies, drop unusable, take latest timestamp; "
+                              "labels: only ClinicalAssessment_<subject>*.xlsx",
+            "skipped": {k: list(v) for k, v in skipped.items()},
+            "notes": [{"tag": t, "notes": n} for t, n in issues],
         },
         "samples": samples,
     }
@@ -364,5 +567,5 @@ if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--no_fix", action="store_true",
-                    help="不套用 PO<3 修正，輸出原始標籤的 kimore_full.pkl")
+                    help="不套用 PO<3 修正，輸出原始標籤的 kimore_full_v3_nofix.pkl")
     run_preprocessing(apply_fix=not ap.parse_args().no_fix)
