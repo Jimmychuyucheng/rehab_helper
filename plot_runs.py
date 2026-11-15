@@ -372,8 +372,7 @@ def plot_po_cf(run, out, made):
 
 
 # ---------------------------------------------------------------- 多個實驗對照
-def plot_compare(runs, made):
-    out = os.path.join("runs", "compare_plots")
+def plot_compare(runs, made, out=os.path.join("runs", "compare_plots")):
     os.makedirs(out, exist_ok=True)
     names = [r["name"] for r in runs]
     # 各區間 MAE
@@ -413,6 +412,63 @@ def plot_compare(runs, made):
     write_index(out, [p for p in made if p.startswith(out)], L("實驗對照：", "Run comparison: ") + "、".join(names))
 
 
+def plot_compare_groups(groups, made, out):
+    """--group 模式：每組 (同設定不同 seed) 畫成一條線 = 各 run 的平均，淡色帶 = 最小～最大。"""
+    os.makedirs(out, exist_ok=True)
+    colors = {g: SERIES[i % 8] for i, g in enumerate(groups)}
+    # 各區間 MAE：每組一根柱，誤差線 = 最小～最大
+    fig, ax = plt.subplots(figsize=(9, 4))
+    x = np.arange(len(BINS) + 1)
+    w = 0.8 / len(groups)
+    for i, (g, runs) in enumerate(groups.items()):
+        per_run = []
+        for run in runs:
+            v = []
+            for lo, hi in BINS:
+                sel = [r for r in run["rows"] if lo <= r["t"] < hi]
+                v.append(mae([r["t"] for r in sel], [r["p"] for r in sel]))
+            v.append(mae([r["t"] for r in run["rows"]], [r["p"] for r in run["rows"]]))
+            per_run.append(v)
+        a = np.array(per_run)
+        m = a.mean(0)
+        ax.bar(x - 0.4 + w * (i + 0.5), m, w - 0.02, color=colors[g],
+               yerr=[m - a.min(0), a.max(0) - m], ecolor=INK2, capsize=3, error_kw={"lw": 1},
+               label=f"{g}（{len(runs)} runs）")
+    ax.set_xticks(x, BIN_NAMES + [L("整體", "overall")])
+    ax.set_xlabel(L("真實 TS 區間", "True TS range"))
+    ax.set_ylabel(L("MAE（分）", "MAE (points)"))
+    ax.set_title(L("各組在各分數區間的 MAE（柱 = 平均，線 = 最小～最大）",
+                   "MAE by score range (bar = mean, whisker = min–max)"))
+    ax.legend(loc="upper right")
+    ax.grid(axis="x", visible=False)
+    save(fig, os.path.join(out, "cmp_score_bins.png"), made)
+    # 各折 MAE：盲猜 + 每組一條線
+    fig, ax = plt.subplots(figsize=(8, 4))
+    first = next(iter(groups.values()))[0]
+    ks = [fd["k"] for fd in first["folds"]]
+    base = [fd["metrics"].get("baseline_per_ex_mae") for fd in first["folds"]]
+    if all(b is not None for b in base):
+        ax.plot(ks, base, marker="s", ms=6, color=BASELINE_GRAY, ls="--",
+                label=L(f"盲猜（{np.mean(base):.2f}）", f"guess ({np.mean(base):.2f})"))
+    for g, runs in groups.items():
+        a = np.array([[mae([r["t"] for r in fd["rows"]], [r["p"] for r in fd["rows"]]) for fd in run["folds"]]
+                      for run in runs])
+        m = a.mean(0)
+        ax.fill_between(ks, a.min(0), a.max(0), color=colors[g], alpha=0.15, lw=0)
+        ax.plot(ks, m, marker="o", ms=7, color=colors[g],
+                label=f"{g}（{m.mean():.2f} ± {a.mean(1).std(ddof=1) if len(runs) > 1 else 0:.2f}）")
+    ax.set_xticks(ks)
+    ax.set_xlabel("fold")
+    ax.set_ylabel(L("測試集 MAE（分）", "Test MAE (points)"))
+    ax.set_title(L("各折 MAE（線 = 各 seed 平均，色帶 = 最小～最大）",
+                   "Per-fold MAE (line = seed mean, band = min–max)"))
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=len(groups) + 1)
+    save(fig, os.path.join(out, "cmp_fold_mae.png"), made)
+    write_index(out, [p for p in made if p.startswith(out)],
+                L("分組對照：", "Group comparison: ") + "；".join(
+                    f"{g} = {', '.join(r['name'] for r in runs)}" for g, runs in groups.items()))
+
+
 def write_index(out, paths, title):
     with open(os.path.join(out, "README.md"), "w") as f:
         f.write(f"# {title}\n\n")
@@ -424,7 +480,11 @@ def write_index(out, paths, title):
 # ---------------------------------------------------------------- 主程式
 def main():
     ap = argparse.ArgumentParser(description="把 runs/<name> 的結果畫成圖")
-    ap.add_argument("names", nargs="+", help="runs/ 底下的實驗名稱")
+    ap.add_argument("names", nargs="*", help="runs/ 底下的實驗名稱")
+    ap.add_argument("--group", action="append", default=[], metavar="名稱=run1,run2,...",
+                    help="同設定不同 seed 合成一組，對照圖每組畫一條線 (平均) + 最小～最大色帶；可重複")
+    ap.add_argument("--compare_only", action="store_true", help="只畫對照圖，不重畫各 run 自己的圖")
+    ap.add_argument("--out", default=os.path.join("runs", "compare_plots"), help="對照圖輸出資料夾")
     ap.add_argument("--clip", action="store_true", help="把 TS 預測夾在 10–50（舊的 baseline 沒有 clip）")
     ap.add_argument("--pkl", default=None, help="KIMORE pkl：用來算各動作盲猜，並使用其中的真實分數")
     args = ap.parse_args()
@@ -435,9 +495,20 @@ def main():
         from dataset import load_kimore
         samples, _ = load_kimore(args.pkl)
 
+    groups = {}
+    for g in args.group:
+        gname, members = g.split("=", 1)
+        groups[gname] = [m for m in members.split(",") if m]
+    names = list(dict.fromkeys(args.names + [m for ms in groups.values() for m in ms]))
+    if not names:
+        ap.error("請給 run 名稱或 --group")
+
     runs, made_all = [], []
-    for name in args.names:
+    for name in names:
         run = load_run(name, clip=args.clip, pkl_samples=samples)
+        if args.compare_only:
+            runs.append(run)
+            continue
         out = os.path.join(run["root"], "plots")
         os.makedirs(out, exist_ok=True)
         made = []
@@ -452,8 +523,11 @@ def main():
         write_index(out, made, f"{name}" + (" (clip)" if args.clip else ""))
         runs.append(run)
         made_all += made
-    if len(runs) > 1:
-        plot_compare(runs, made_all)
+    if groups:
+        by = {r["name"]: r for r in runs}
+        plot_compare_groups({g: [by[m] for m in ms] for g, ms in groups.items()}, made_all, args.out)
+    elif len(runs) > 1:
+        plot_compare(runs, made_all, args.out)
     if not ZH:
         print("提醒：找不到中文字型，圖上改用英文標籤。")
     print("已輸出：")
