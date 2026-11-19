@@ -314,19 +314,189 @@ def g_po_cf(name, runs, out, made):
     save(fig, os.path.join(out, f"{name}_07_po_cf_and_ts_sum.png"), made)
 
 
+# ------------------------------------------------------------------ 多組對照 (02/04/05/06)
+def _fold_vals(runs):
+    return [[mae([r["t"] for r in fd["rows"]], [r["p"] for r in fd["rows"]]) for fd in run["folds"]] for run in runs]
+
+
+def _bin_vals(runs):
+    M, B, n = [], [], None
+    for run in runs:
+        m, b, nn = [], [], []
+        for lo, hi in BINS:
+            s_ = [r for r in run["rows"] if lo <= r["t"] < hi]
+            nn.append(len(s_))
+            m.append(mae([r["t"] for r in s_], [r["p"] for r in s_]))
+            b.append(float(np.mean([r["p"] - r["t"] for r in s_])))
+        M.append(m)
+        B.append(b)
+        n = nn
+    return np.array(M), np.array(B), n
+
+
+def _ex_vals(runs, exs):
+    out = []
+    for run in runs:
+        v = np.full((len(run["folds"]), len(exs)), np.nan)
+        for i, fd in enumerate(run["folds"]):
+            for j, e in enumerate(exs):
+                s_ = [r for r in fd["rows"] if r["exercise"] == e]
+                v[i, j] = mae([r["t"] for r in s_], [r["p"] for r in s_])
+        out.append(np.nanmean(v, 0))
+    return np.array(out)
+
+
+def _grouped_bars(ax, x, series, w_total=0.8, labels_fmt="{:.2f}", horizontal=False):
+    """series: [(名稱, 平均, 誤差 or None, 顏色)]，並排畫柱並標數值。"""
+    k = len(series)
+    w = w_total / k
+    for i, (name, m, err, c) in enumerate(series):
+        pos = x - w_total / 2 + w * (i + 0.5)
+        kw = dict(color=c, label=name)
+        if err is not None:
+            kw.update({("xerr" if horizontal else "yerr"): err, "error_kw": ERR})
+        bars = (ax.barh(pos, m, w - 0.03, **kw) if horizontal else ax.bar(pos, m, w - 0.03, **kw))
+        hi = err[1] if err is not None else np.zeros(len(m))
+        lo = err[0] if err is not None else np.zeros(len(m))
+        for b, v, h, l_ in zip(bars, m, hi, lo):
+            if horizontal:
+                ax.text(v + h + 0.08, b.get_y() + b.get_height() / 2, labels_fmt.format(v),
+                        va="center", fontsize=7.5, color=INK2)
+            else:
+                y = v + h + 0.08 if v >= 0 else v - l_ - 0.08
+                ax.text(b.get_x() + b.get_width() / 2, y, labels_fmt.format(v), ha="center",
+                        va="bottom" if v >= 0 else "top", fontsize=7.5, color=INK2)
+
+
+def cmp_groups(groups, out, made, samples):
+    names = list(groups)
+    colors = {g: SERIES[i % 8] for i, g in enumerate(names)}
+    first = groups[names[0]][0]
+    sub = L("（各組 = seed 平均，誤差線 = 最小～最大）", " (seed mean, min–max)")
+
+    # 02 各折 vs 盲猜
+    ks = [f"fold {fd['k']}" for fd in first["folds"]] + [L("平均", "mean")]
+    base = []
+    for fd in first["folds"]:
+        em = exercise_baseline(samples, fd["k"])
+        base.append(mae([r["t"] for r in fd["rows"]], [em[r["exercise"]] for r in fd["rows"]]))
+    base.append(np.mean(base))
+    series = [(L("盲猜（依動作平均）", "Mean baseline"), np.array(base), None, BASELINE_GRAY)]
+    tops = [max(base)]
+    for g in names:
+        v = np.array([r + [np.mean(r)] for r in _fold_vals(groups[g])])
+        m, err = minmax_err(v)
+        series.append((f"{g}", m, err, colors[g]))
+        tops.append((m + err[1]).max())
+    fig, ax = plt.subplots(figsize=(10, 4.2))
+    _grouped_bars(ax, np.arange(len(ks)), series)
+    ax.set_xticks(np.arange(len(ks)), ks)
+    ax.set_ylim(0, max(tops) * 1.22)
+    ax.set_ylabel(L("測試集 MAE（分，越低越好）", "Test MAE (lower is better)"))
+    ax.set_title(L("各折 MAE：盲猜 vs ", "Per-fold MAE: guess vs ") + " vs ".join(names) + sub)
+    ax.legend(loc="upper left", ncol=len(series), fontsize=8)
+    ax.grid(axis="x", visible=False)
+    save(fig, os.path.join(out, "cmp_02_fold_mae_vs_baseline.png"), made)
+
+    # 04 分數區間 MAE + 偏差
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(12, 4.2))
+    s1, s2, t1, t2 = [], [], [], []
+    for g in names:
+        M, B, n = _bin_vals(groups[g])
+        m, err = minmax_err(M)
+        bm, berr = minmax_err(B)
+        s1.append((f"{g}（平衡 MAE {np.mean(M.mean(1)):.2f}）", m, err, colors[g]))
+        s2.append((g, bm, berr, colors[g]))
+        t1.append((m + err[1]).max())
+        t2.append(np.abs(np.r_[bm + berr[1], bm - berr[0]]).max())
+    labels = [f"{b}\n(n={k})" for b, k in zip(BIN_NAMES, n)]
+    x = np.arange(len(BINS))
+    _grouped_bars(a1, x, s1)
+    a1.set_ylim(0, max(t1) * 1.25)
+    a1.set_ylabel(L("MAE（分）", "MAE (points)"))
+    a1.set_title(L("各分數區間錯多少", "Error by score range"))
+    _grouped_bars(a2, x, s2, labels_fmt="{:+.2f}")
+    a2.axhline(0, color=AXIS, lw=1)
+    lim = max(t2) * 1.35
+    a2.set_ylim(-lim, lim)
+    a2.set_ylabel(L("平均偏差（預測 − 真實）", "Mean bias (pred − true)"))
+    a2.set_title(L("往哪邊錯（正 = 給太高）", "Direction of error (+ = too high)"))
+    for a in (a1, a2):
+        a.set_xticks(x, labels)
+        a.set_xlabel(L("真實 TS 區間", "True TS range"))
+        a.grid(axis="x", visible=False)
+        a.legend(loc="upper right", fontsize=8)
+    fig.suptitle(L("分數區間分析：", "Score-range analysis: ") + " vs ".join(names) + sub,
+                 fontweight="bold", color=INK)
+    fig.tight_layout()
+    save(fig, os.path.join(out, "cmp_04_score_bins_mae_bias.png"), made)
+
+    # 05 各動作 vs 盲猜
+    exs = sorted({r["exercise"] for r in first["rows"]})
+    bmat = np.full((len(first["folds"]), len(exs)), np.nan)
+    for i, fd in enumerate(first["folds"]):
+        em = exercise_baseline(samples, fd["k"])
+        for j, e in enumerate(exs):
+            s_ = [r for r in fd["rows"] if r["exercise"] == e]
+            bmat[i, j] = mae([r["t"] for r in s_], [em[e]] * len(s_))
+    series = [(L("盲猜（依動作平均）", "Mean baseline"), np.nanmean(bmat, 0), None, BASELINE_GRAY)]
+    tops = [np.nanmean(bmat, 0).max()]
+    for g in names:
+        m, err = minmax_err(_ex_vals(groups[g], exs))
+        series.append((g, m, err, colors[g]))
+        tops.append((m + err[1]).max())
+    fig, ax = plt.subplots(figsize=(10, 4.2))
+    _grouped_bars(ax, np.arange(len(exs)), series)
+    ax.set_xticks(np.arange(len(exs)), exs)
+    ax.set_ylim(0, max(tops) * 1.22)
+    ax.set_ylabel(L("測試集 MAE（分，五折平均）", "Test MAE (5-fold mean)"))
+    ax.set_title(L("各動作 MAE：盲猜 vs ", "MAE per exercise: guess vs ") + " vs ".join(names) + sub)
+    ax.legend(loc="upper left", ncol=len(series), fontsize=8)
+    ax.grid(axis="x", visible=False)
+    save(fig, os.path.join(out, "cmp_05_per_exercise_mae.png"), made)
+
+    # 06 各組別
+    rows0 = first["rows"]
+    gs = [g for g in SUBGROUP_ORDER if any(r["subgroup"] == g for r in rows0)]
+    ns = [sum(r["subgroup"] == g for r in rows0) for g in gs]
+    vals = {}
+    for g in names:
+        V = [[mae([r["t"] for r in run["rows"] if r["subgroup"] == sg],
+                  [r["p"] for r in run["rows"] if r["subgroup"] == sg]) for sg in gs] for run in groups[g]]
+        vals[g] = minmax_err(V)
+    order = np.argsort(vals[names[0]][0])[::-1]          # 依第一組由大到小，最差的在上
+    fig, ax = plt.subplots(figsize=(8, 4.2))
+    y = np.arange(len(gs))
+    series = [(g, vals[g][0][order], [vals[g][1][0][order], vals[g][1][1][order]], colors[g]) for g in names]
+    _grouped_bars(ax, y, series, horizontal=True)        # y 軸反轉後，第一組在每對的上方
+    ax.set_yticks(y, [f"{gs[i]} (n={ns[i]})" for i in order])
+    ax.invert_yaxis()
+    ax.set_xlim(0, max((vals[g][0] + vals[g][1][1]).max() for g in names) * 1.18)
+    ax.set_xlabel(L("測試集 MAE（分）", "Test MAE (points)"))
+    ax.set_title(L("各組別 MAE：", "MAE by subgroup: ") + " vs ".join(names) + sub)
+    ax.legend(loc="lower right", fontsize=8)
+    ax.grid(axis="y", visible=False)
+    save(fig, os.path.join(out, "cmp_06_subgroup_mae.png"), made)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--group", action="append", required=True, metavar="名稱=run1,run2,...")
     ap.add_argument("--pkl", required=True)
     ap.add_argument("--out", default="runs/plots_groups")
+    ap.add_argument("--cmp_only", action="store_true", help="只畫多組對照圖 (cmp_02/04/05/06)")
     a = ap.parse_args()
     from dataset import load_kimore
     samples, _ = load_kimore(a.pkl)
     os.makedirs(a.out, exist_ok=True)
     made = []
+    groups = {}
     for g in a.group:
         name, members = g.split("=", 1)
         runs = [P.load_run(m, pkl_samples=samples) for m in members.split(",")]
+        groups[name] = runs
+        if a.cmp_only:
+            continue
         g_learning_curves(name, runs, a.out, made)
         g_fold_bars(name, runs, a.out, made, samples)
         g_pred_vs_true(name, runs, a.out, made)
@@ -335,7 +505,10 @@ def main():
         g_subgroups(name, runs, a.out, made)
         if all(r["multitask"] for r in runs):
             g_po_cf(name, runs, a.out, made)
-    P.write_index(a.out, made, L("分組圖：", "Group plots: ") + "；".join(a.group))
+    if len(groups) > 1:
+        cmp_groups(groups, a.out, made, samples)
+    allpng = sorted(os.path.join(a.out, f) for f in os.listdir(a.out) if f.endswith(".png"))
+    P.write_index(a.out, allpng, L("分組圖：", "Group plots: ") + "；".join(a.group))
     print("已輸出：")
     for p in made:
         print("  " + p)
