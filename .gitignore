@@ -11,6 +11,7 @@ expr.ipynb
 data_info/
 wandb/
 *.txt
+!requirements.txt
 heatmap/
 *.npy
 *.pth

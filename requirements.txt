@@ -1,0 +1,23 @@
+# Rehab (KIMORE / KERAAL) pipeline: train_rehab.py, dataset.py, preprocess_kimore.py,
+# analyze_runs.py, plot_*.py, compare_fixed_samples.py
+#
+# Install PyTorch FIRST, matching the server's CUDA version (check with `nvidia-smi`), e.g.:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+# then:
+#   pip install -r requirements.txt
+#
+# Versions are minimums tested with Python 3.8 (see environment.yml, Windows export).
+
+torch>=2.1
+numpy>=1.24
+pandas>=2.0
+matplotlib>=3.7
+seaborn>=0.13
+Pillow>=10.0
+
+# ---- Optional: only needed by the older SLR scripts (train.py, test.py, ensemble.py, utils/) ----
+# scikit-learn>=1.3
+# tqdm>=4.65
+# PyYAML>=6.0
+# tensorboard
+# wandb
