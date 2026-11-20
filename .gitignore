@@ -23,5 +23,7 @@ result_vis/
 pretrained_models/
 data/kimore/
 data/keraal/
+/data/*
+!/data/*.py
 runs/
 annotation/
