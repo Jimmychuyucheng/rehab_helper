@@ -157,9 +157,11 @@ VERIFIED_START_TRIMS = {
 }
 
 
-def load_joint_positions(csv_path: str, max_dropped: int = MAX_DROPPED):
+def load_joint_positions(csv_path: str, max_dropped: int = MAX_DROPPED, return_index: bool = False):
     """
     讀取 JointPosition.csv，回傳 ((T, 25, 3) float32, info)；無法使用時丟出 ValueError。
+    return_index=True 時多回傳 (start, end)：保留段在原始 CSV 的幀號 (= 行號，0 起算，含頭不含尾，
+    end - start == T)；預設 False，回傳值與 v3 完全相同。
     1. 逐行讀，空行記為缺幀 (保留時間位置)，多人幀先全部保留。
     2. 軌跡追蹤：每具骨架接到「最後位置水平距離最近且 < TRACK_JUMP」的軌跡 (同一幀不重複)，否則開新軌跡；
        軌跡不會過期 (受試者中斷後回到原位會接回)。幀數最多的軌跡 = 受試者，其他幀視為缺幀。
@@ -239,6 +241,9 @@ def load_joint_positions(csv_path: str, max_dropped: int = MAX_DROPPED):
         raise ValueError(f"幀數 {T} < {MIN_FRAMES}")
     info = {"frames": T, "gap_frames": n_gap, "dropped_frames": dropped, "multi_body_frames": n_multi,
             "off_subject_frames": n_off, "other_tracks": n_other_tracks, "zero_frames": int(zero_rows.sum())}
+    if return_index:
+        start = have[0] + keep[0]          # keep 為 picked (從 have[0] 起算) 中的連續索引
+        return vals.reshape(T, 25, 3).astype(np.float32), info, (start, start + T)
     return vals.reshape(T, 25, 3).astype(np.float32), info
 
 
