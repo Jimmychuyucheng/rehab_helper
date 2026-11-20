@@ -14,14 +14,14 @@
     y_pred_cf) 會另外列出 ts_sum、PO/CF 表、「哪一類問題比較嚴重」的猜對率與 ts_head/ts_sum 一致性。
 
     python analyze_runs.py baseline --clip --pkl data/kimore/processed/kimore_full_pofix.pkl \
-        --out runs/compare_v4_baseline.md
+        --out runs/v4/compare_v4_baseline.md
     python analyze_runs.py baseline v4_ts v4_mt --clip --pkl data/kimore/processed/kimore_full_pofix.pkl \
-        --out runs/compare_v4.md
+        --out runs/v4/compare_v4.md
 
     v5：--group 把多個 run 視為同一設定的重複 (三次平均 ± 標準差、各 fold 範圍、avg vs best、組間比較)：
     python analyze_runs.py --group baseline=v5_base_s42,v5_base_s43,v5_base_s44 \
         --group 多任務=v5_mt_s42,v5_mt_s43,v5_mt_s44 --pkl data/kimore/processed/kimore_full_pofix.pkl \
-        --status runs/v5_status.txt --out runs/compare_v5_seeds.md
+        --status runs/v5/v5_status.txt --out runs/v5/compare_v5_seeds.md
 ================================================================================
 """
 import argparse
@@ -36,6 +36,7 @@ import numpy as np
 from train_rehab import (regression_metrics, range_metrics, spearman, pearson,
                          range_table, SCORE_BINS, bin_label, SCORE_MIN, TS_MIN, TS_MAX)
 from dataset import SCORE_MAX
+from run_paths import run_dir
 
 DIR_THRESHOLD = 0.20   # |PO/15 − CF/35| > 0.20 視為「PO、CF 差異大」
 
@@ -51,7 +52,7 @@ def load_folds(name, clip=False, samples=None, sel="avg"):
     clip=True 時事後把預測夾在各自範圍 (TS [10,50]、PO [3,15]、CF [7,35])。
     sel="best" 時讀 v5 的 y_pred*_best 欄位 (best.pt)；預設 y_pred* (v5 為平均最後 K 個 epoch 的模型)。
     """
-    files = sorted(glob.glob(os.path.join(RUNS_DIR, name, "fold*", "test_predictions.csv")))
+    files = sorted(glob.glob(os.path.join(run_dir(name, RUNS_DIR), "fold*", "test_predictions.csv")))
     if not files:
         raise FileNotFoundError(f"{RUNS_DIR}/{name} 底下找不到 fold*/test_predictions.csv")
     out = []
@@ -302,7 +303,7 @@ def run_status(names, status_file):
     lines = ["| run | 完成折數 | 結束碼 | 耗時（分） | 狀態 |", "|---|---|---|---|---|"]
     ok_all = True
     for n in names:
-        k = len(glob.glob(os.path.join(RUNS_DIR, n, "fold*", "metrics.json")))
+        k = len(glob.glob(os.path.join(run_dir(n, RUNS_DIR), "fold*", "metrics.json")))
         rc, mins = codes.get(n, (None, None))
         ok = k == 5 and rc in (0, None)
         ok_all &= ok

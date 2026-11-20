@@ -4,7 +4,7 @@
   story_1_seed_variance.png  單跑不可靠：上週兩次單跑 vs v5 同設定重跑 3 次 (seed 42/43/44，分組相同)
   story_2_ensemble.png       MAE 一路下降：v5 單一模型 (best) → 平均權重 → 資料修正 (v6) → 3 個模型取平均
 
-    python plot_story.py --out runs/compare_plots_v6
+    python plot_story.py --out runs/v6/compare_plots_v6
 """
 import argparse
 import os
@@ -154,7 +154,7 @@ def story2(out):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="runs/compare_plots_v6")
+    ap.add_argument("--out", default="runs/v6/compare_plots_v6")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     p1, single, means = story1(a.out)

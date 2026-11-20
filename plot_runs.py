@@ -21,6 +21,8 @@ import os
 import sys
 from collections import defaultdict
 
+from run_paths import run_dir
+
 import numpy as np
 import matplotlib
 
@@ -70,7 +72,7 @@ def read_csv(path):
 
 
 def load_run(name, clip=False, pkl_samples=None):
-    root = os.path.join("runs", name)
+    root = run_dir(name)
     folds = sorted(d for d in os.listdir(root) if d.startswith("fold") and
                    os.path.exists(os.path.join(root, d, "test_predictions.csv")))
     if not folds:

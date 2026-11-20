@@ -4,7 +4,7 @@
 三格：TS MAE (越小越好)、斜率 (越接近 1 越好)、低分 10–25 的平均偏差 (越接近 0 越好)。
 數值與 analyze_runs.py (compare_v6_seeds.md) 相同。
 
-    python plot_avg_vs_best.py --out runs/compare_plots_v6/avg_vs_best.png
+    python plot_avg_vs_best.py --out runs/v6/compare_plots_v6/avg_vs_best.png
 """
 import argparse
 import os
@@ -43,7 +43,7 @@ def main():
     ap.add_argument("--pkl", default="data/kimore/processed/kimore_full_v3.pkl")
     ap.add_argument("--base", default="v6_base_s42,v6_base_s43,v6_base_s44")
     ap.add_argument("--mt", default="v6_mt_s42,v6_mt_s43,v6_mt_s44")
-    ap.add_argument("--out", default="runs/compare_plots_v6/avg_vs_best.png")
+    ap.add_argument("--out", default="runs/v6/compare_plots_v6/avg_vs_best.png")
     a = ap.parse_args()
     samples, _ = load_kimore(a.pkl)
     base, mt = a.base.split(","), a.mt.split(",")
