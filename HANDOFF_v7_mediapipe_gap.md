@@ -219,7 +219,7 @@ Es3 軀幹旋轉的每部錄影 ROM（固定偏移組）：
 
 ## 9. 凍結紀錄
 
-- 判斷標準 commit：`________`（日期：____）
+- 判斷標準 commit：`6ccd464`（日期：2026-11-20）
 - 追加修改（只能追加，需註明日期與原因）：
 
 ### 追加 1（2026-11-20，依 T0 回報）
@@ -260,3 +260,9 @@ T0 發現影片幀數與 Kinect 骨架幀數幾乎相同（比值中位數 1.009
 
 - `.gitignore` 目前涵蓋 `data/kimore/`、`data/keraal/`、`runs/`；本實驗所有資料都在 `data/kimore/` 底下，已足夠。為保險起見另加一行 `data/`。
 - `scripts/build_rgb_manifest.py` 確認後 commit。
+
+**E. 第 3 節正規化做法的修改紀錄**
+
+- 第 3 節「正規化」一項已直接改寫（commit `e1f1b3c`）。原文為「與 Kinect 前處理第二版一樣：只用開頭 10 幀決定原點與方向，整段套用同一個轉換；尺度用整段 SpineBase→SpineShoulder 長度中位數」。
+- 原因：SpineBase、SpineShoulder 不是共同骨架的點，MediaPipe 沒有對應點；Kinect 與 MediaPipe 兩邊的正規化必須用完全相同的點，否則比較的落差會混入正規化本身的差異。因此原點、方向、尺度全部改用共同骨架的 HipMid、HipL/R、ShoulderMid。
+- 此修改不涉及第 4 節的判斷標準數字。
