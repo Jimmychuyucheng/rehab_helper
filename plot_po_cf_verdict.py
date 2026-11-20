@@ -3,7 +3,7 @@
   左：TS MAE —— 盲猜 / baseline / 多任務 TS head / 多任務 PO+CF 相加 (每個點 = 一個 seed)
   右：「哪一類比較嚴重」猜對率 —— 一律猜多數 / 依動作種類猜 / 多任務模型
 
-    python plot_po_cf_verdict.py --out runs/compare_plots_v6/po_cf_verdict.png
+    python plot_po_cf_verdict.py --out runs/v6/compare_plots_v6/po_cf_verdict.png
 """
 import argparse
 import os
@@ -40,7 +40,7 @@ def main():
     ap.add_argument("--pkl", default="data/kimore/processed/kimore_full_v3.pkl")
     ap.add_argument("--base", default="v6_base_s42,v6_base_s43,v6_base_s44")
     ap.add_argument("--mt", default="v6_mt_s42,v6_mt_s43,v6_mt_s44")
-    ap.add_argument("--out", default="runs/compare_plots_v6/po_cf_verdict.png")
+    ap.add_argument("--out", default="runs/v6/compare_plots_v6/po_cf_verdict.png")
     a = ap.parse_args()
 
     samples, _ = load_kimore(a.pkl)

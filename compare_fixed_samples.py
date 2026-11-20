@@ -5,7 +5,7 @@ v5 (舊 pkl) vs v6 (v3 pkl) 在 20 筆資料修正樣本上的 TS 誤差對照�
 每個 run 的 5 個 fold 測試集合起來恰好涵蓋每個樣本一次；每組 3 個 seed，
 表中列出 3 個 seed 的 |誤差| 平均 (與最小~最大)。預測不做事後 clip。
 
-    python compare_fixed_samples.py --out runs/compare_v5_v6_fixed.md
+    python compare_fixed_samples.py --out runs/v6/compare_v5_v6_fixed.md
 """
 import argparse
 import glob
@@ -14,6 +14,8 @@ import pickle
 
 import numpy as np
 import pandas as pd
+
+from run_paths import run_dir
 
 # (sample, 類別, 說明)；與 commit 1e21047 的清單一致
 FIXED = [
@@ -42,7 +44,7 @@ FIXED = [
 
 def load_run(name, runs_dir, col):
     """回傳 DataFrame(index=sample, columns=[y_true, y_pred])；不完整回傳 None。"""
-    files = sorted(glob.glob(os.path.join(runs_dir, name, "fold*", "test_predictions.csv")))
+    files = sorted(glob.glob(os.path.join(run_dir(name, runs_dir), "fold*", "test_predictions.csv")))
     if len(files) != 5:
         return None
     df = pd.concat([pd.read_csv(f) for f in files])
@@ -111,7 +113,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs_dir", default="runs")
     ap.add_argument("--sel", choices=["avg", "best"], default="avg")
-    ap.add_argument("--out", default="runs/compare_v5_v6_fixed.md")
+    ap.add_argument("--out", default="runs/v6/compare_v5_v6_fixed.md")
     ap.add_argument("--pkl", default="data/kimore/processed/kimore_full_v3.pkl")
     a = ap.parse_args()
     suf = "" if a.sel == "avg" else "_best"
