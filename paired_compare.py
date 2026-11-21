@@ -20,7 +20,7 @@ Q1（第 3.6 節）：每部影片 v、每個 seed s，用 v 所在測試折的 
                交叉配對的 x、y 距離和比同側小 → 該部位左右對調（未正規化、逐幀減 HipMid 的相機座標，同 align.lr_flip）。
                只用於「若左右判斷正確時的落差」，不參與判定。
   追加 8 B 的檢查量 |K_own − K_common| 逐部列出；中位數與 N/2 的比較在彙整時做。
-Q2／Q3（第 3.7 節；特徵定義見 features_v7.py 與 runs/v7_gap/feature_list.md，追加 17 A）：
+Q2／Q3（第 3.7 節；特徵定義見 features_v7.py 與 docs/v7_feature_list.md，追加 17 A、18 A）：
   - 角度在共同參考幀正規化後的座標上計算。MediaPipe 端 visibility < 0.5 的關節視為缺漏（追加 7 D），
     該幀用到此關節的角度為 NaN；有效幀比例 < 50% → 該影片不納入該特徵（valid_ok = False）。Kinect 不遮罩。
   - 摘要值（決策用）：ROM = P95 − P5、峰值 = P95（追加 17 A）。兩邊各自在保留段時段上計算（追加 14 A）。

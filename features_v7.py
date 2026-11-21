@@ -7,7 +7,7 @@ y = 向上（約 Kinect +Y）、z = x × y（約 Kinect +Z，遠離鏡頭）。�
 官方用到 SpineShoulder／SpineBase 的特徵，依第 3.2 節改用 ShoulderMid／HipMid（「以共同骨架近似」）。
 摘要值（追加 17 A）：ROM = P95 − P5、峰值 = P95；不使用官方的找峰值（findpeaks）、低通濾波（filtering.m）與頭尾裁切。
 
-    python features_v7.py            # 產生 runs/v7_gap/feature_list.md
+    python features_v7.py            # 產生 docs/v7_feature_list.md（追加 18 A4；已凍結）
 """
 import os
 
@@ -73,11 +73,11 @@ def _knee3d(s, src="官方 CF", note=""):
 
 
 def _angle_c():
+    """追加 18 A1：官方 angleHipL／angleHipR 以 HipMid 近似 SpineBase 後數學上完全相同，只保留一項。"""
     return [
-        _f("angle_c_L", lambda X: atan2d(P(X, "HipMid")[:, 0] - P(X, "HipL")[:, 0], P(X, "HipMid")[:, 1] - P(X, "HipL")[:, 1]),
-           ["HipL", "HipR"], True, "度", "官方 CF", "atan2(HipMid.x − HipL.x, HipMid.y − HipL.y)", APPROX_B),
-        _f("angle_c_R", lambda X: atan2d(P(X, "HipR")[:, 0] - P(X, "HipMid")[:, 0], P(X, "HipR")[:, 1] - P(X, "HipMid")[:, 1]),
-           ["HipL", "HipR"], True, "度", "官方 CF", "atan2(HipR.x − HipMid.x, HipR.y − HipMid.y)", APPROX_B),
+        _f("angle_c", lambda X: atan2d(P(X, "HipMid")[:, 0] - P(X, "HipL")[:, 0], P(X, "HipMid")[:, 1] - P(X, "HipL")[:, 1]),
+           ["HipL", "HipR"], True, "度", "官方 CF", "atan2(HipMid.x − HipL.x, HipMid.y − HipL.y)",
+           APPROX_B + "；官方 angleHipL／angleHipR 近似後完全相同（HipMid 為兩髖中點），只保留一項（追加 18 A1）"),
     ]
 
 
@@ -218,7 +218,7 @@ FEATURES = {ex: {f["name"]: (f["fn"], f["joints"], f["is_dir"]) for f in fs} for
 
 
 def render_markdown():
-    L = ["# v7 T7 特徵清單（追加 17 A）", "",
+    L = ["# v7 T7 特徵清單（追加 17 A、18 A；凍結）", "",
          "來源：KIMORE 官方 MATLAB 腳本 `Script/feat_extract_Ex1.m`～`feat_extract_Ex5.m`（各動作所有副本 md5 相同），"
          "加上第 3.7 節原定義與本專題補充。程式：`features_v7.py`（`FEATURE_SPECS`），由 `paired_compare.py` 使用。", "",
          "## 共同約定", "",
@@ -248,17 +248,19 @@ def render_markdown():
     L += ["", "## 暫定清單中移除的項目", "", "| 動作 | 特徵 | 原因 |", "| --- | --- | --- |"]
     L += [f"| {a} | {b} | {c} |" for a, b, c in DROPPED_PROVISIONAL]
     L += ["", "## 與官方腳本不同之處（實作上的選擇）", "",
-          "1. 不做官方的 1 Hz Butterworth 低通濾波與頭尾裁切（前 10～30 幀、最後 15 幀）：摘要值改用 P95／P5，"
-          "對單幀錯誤已較穩健；MediaPipe 有缺漏幀，`filtfilt` 無法直接套用。兩邊處理相同。",
+          "1. 不套用官方的 1 Hz Butterworth 低通濾波與頭尾裁切（前 10～30 幀、最後 15 幀）（追加 18 A3）：摘要值用 P95／P5，"
+          "已能降低單幀錯誤的影響；MediaPipe 有缺漏幀，雙向濾波（`filtfilt`）無法直接套用。Kinect 與 MediaPipe 處理相同。",
+          "5. angle C：官方左右兩項以 HipMid 近似後數學上相同，只保留 `angle_c`（追加 18 A1）。",
           "2. ±180° 跳動：官方以「相鄰幀差 > 100° 時反號」處理；這裡 `shoulder_ext` 映射到 [−90°, 270°)、`knee_sag` 取 mod 360，"
           "讓舉臂過頭、深蹲時角度連續。",
-          "3. Es3 主要動作量：官方程式是兩肘的 x 距離（`linkelbow = |Elbow_L.x − Elbow_R.x|`），圖例與註解寫 wrist；依程式用肘。",
+          "3. Es3 主要動作量：官方程式是兩肘的 x 距離（`linkelbow = |Elbow_L.x − Elbow_R.x|`），圖例與註解寫 wrist；"
+          "以程式為準用肘（追加 18 A2）。",
           "4. 長度、面積改以軀幹長為單位（正規化的結果），不是公尺。", ""]
     return "\n".join(L)
 
 
 if __name__ == "__main__":
-    os.makedirs("runs/v7_gap", exist_ok=True)
-    with open("runs/v7_gap/feature_list.md", "w") as f:
+    os.makedirs("docs", exist_ok=True)
+    with open("docs/v7_feature_list.md", "w") as f:
         f.write(render_markdown())
-    print("→ runs/v7_gap/feature_list.md", sum(len(v) for v in FEATURE_SPECS.values()), "項")
+    print("→ docs/v7_feature_list.md", sum(len(v) for v in FEATURE_SPECS.values()), "項")

@@ -1,4 +1,4 @@
-# v7 T7 特徵清單（追加 17 A）
+# v7 T7 特徵清單（追加 17 A、18 A；凍結）
 
 來源：KIMORE 官方 MATLAB 腳本 `Script/feat_extract_Ex1.m`～`feat_extract_Ex5.m`（各動作所有副本 md5 相同），加上第 3.7 節原定義與本專題補充。程式：`features_v7.py`（`FEATURE_SPECS`），由 `paired_compare.py` 使用。
 
@@ -12,7 +12,7 @@
 - **方向角**：標「是」的特徵，逐幀差以 (M − K + 180) mod 360 − 180 計算。
 - **來源**：官方 PO = 官方 primary outcome；官方 CF = 官方 control factor；3.7 = 第 3.7 節原定義；補充 = 本專題補充（追加 17 A 第 4 點）。
 
-## Es1（10 項）
+## Es1（9 項）
 
 | # | 特徵 | 來源 | 公式 | 關節 | 單位 | 方向角 | 備註 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -22,12 +22,11 @@
 | 4 | `elbow_R` | 官方 CF | ∠(ShoulderR, ElbowR, WristR)，三維 | ShoulderR, ElbowR, WristR | 度 | 否 |  |
 | 5 | `knee_L` | 官方 CF | ∠(HipL, KneeL, AnkleL)，三維 | HipL, KneeL, AnkleL | 度 | 否 |  |
 | 6 | `knee_R` | 官方 CF | ∠(HipR, KneeR, AnkleR)，三維 | HipR, KneeR, AnkleR | 度 | 否 |  |
-| 7 | `angle_c_L` | 官方 CF | atan2(HipMid.x − HipL.x, HipMid.y − HipL.y) | HipL, HipR | 度 | 是 | 以共同骨架近似（SpineBase→HipMid） |
-| 8 | `angle_c_R` | 官方 CF | atan2(HipR.x − HipMid.x, HipR.y − HipMid.y) | HipL, HipR | 度 | 是 | 以共同骨架近似（SpineBase→HipMid） |
-| 9 | `trunk_area` | 官方 CF | Heron 公式：三角形 (HipL–HipR, ShoulderR–HipL, ShoulderR–HipR) + (ShoulderL–ShoulderR, ShoulderR–HipL, ShoulderL–HipL) | HipL, HipR, ShoulderL, ShoulderR | 軀幹長² | 否 | 照抄官方的邊長組合 |
-| 10 | `ankle_dist` | 官方 CF | |AnkleL − AnkleR|，三維 | AnkleL, AnkleR | 軀幹長 | 否 |  |
+| 7 | `angle_c` | 官方 CF | atan2(HipMid.x − HipL.x, HipMid.y − HipL.y) | HipL, HipR | 度 | 是 | 以共同骨架近似（SpineBase→HipMid）；官方 angleHipL／angleHipR 近似後完全相同（HipMid 為兩髖中點），只保留一項（追加 18 A1） |
+| 8 | `trunk_area` | 官方 CF | Heron 公式：三角形 (HipL–HipR, ShoulderR–HipL, ShoulderR–HipR) + (ShoulderL–ShoulderR, ShoulderR–HipL, ShoulderL–HipL) | HipL, HipR, ShoulderL, ShoulderR | 軀幹長² | 否 | 照抄官方的邊長組合 |
+| 9 | `ankle_dist` | 官方 CF | |AnkleL − AnkleR|，三維 | AnkleL, AnkleR | 軀幹長 | 否 |  |
 
-## Es2（17 項）
+## Es2（16 項）
 
 | # | 特徵 | 來源 | 公式 | 關節 | 單位 | 方向角 | 備註 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -38,18 +37,17 @@
 | 5 | `elbow_R` | 官方 CF | ∠(ShoulderR, ElbowR, WristR)，三維 | ShoulderR, ElbowR, WristR | 度 | 否 |  |
 | 6 | `knee_L` | 官方 CF | ∠(HipL, KneeL, AnkleL)，三維 | HipL, KneeL, AnkleL | 度 | 否 |  |
 | 7 | `knee_R` | 官方 CF | ∠(HipR, KneeR, AnkleR)，三維 | HipR, KneeR, AnkleR | 度 | 否 |  |
-| 8 | `angle_c_L` | 官方 CF | atan2(HipMid.x − HipL.x, HipMid.y − HipL.y) | HipL, HipR | 度 | 是 | 以共同骨架近似（SpineBase→HipMid） |
-| 9 | `angle_c_R` | 官方 CF | atan2(HipR.x − HipMid.x, HipR.y − HipMid.y) | HipL, HipR | 度 | 是 | 以共同骨架近似（SpineBase→HipMid） |
-| 10 | `axilla_L` | 官方 CF | ∠(ElbowL, ShoulderL, HipR)，三維（官方以對側髖為「腋下角」的一邊） | ElbowL, ShoulderL, HipR | 度 | 否 |  |
-| 11 | `axilla_R` | 官方 CF | ∠(ElbowR, ShoulderR, HipL)，三維（官方以對側髖為「腋下角」的一邊） | ElbowR, ShoulderR, HipL | 度 | 否 |  |
-| 12 | `wrist_depth_L` | 官方 CF | WristL.z − ShoulderMid.z | WristL, ShoulderL, ShoulderR | 軀幹長 | 否 | 以共同骨架近似（SpineShoulder→ShoulderMid） |
-| 13 | `wrist_depth_R` | 官方 CF | WristR.z − ShoulderMid.z | WristR, ShoulderL, ShoulderR | 軀幹長 | 否 | 以共同骨架近似（SpineShoulder→ShoulderMid） |
-| 14 | `shoulder_width` | 官方 CF | |ShoulderL − ShoulderR|，三維 | ShoulderL, ShoulderR | 軀幹長 | 否 |  |
-| 15 | `hip_width` | 官方 CF | |HipL − HipR|，三維 | HipL, HipR | 軀幹長 | 否 |  |
-| 16 | `shoulder_flex_L` | 補充 | 上臂 ShoulderL→ElbowL 與向下軸 (−y) 的夾角，三維 | ShoulderL, ElbowL | 度 | 否 |  |
-| 17 | `shoulder_flex_R` | 補充 | 上臂 ShoulderR→ElbowR 與向下軸 (−y) 的夾角，三維 | ShoulderR, ElbowR | 度 | 否 |  |
+| 8 | `angle_c` | 官方 CF | atan2(HipMid.x − HipL.x, HipMid.y − HipL.y) | HipL, HipR | 度 | 是 | 以共同骨架近似（SpineBase→HipMid）；官方 angleHipL／angleHipR 近似後完全相同（HipMid 為兩髖中點），只保留一項（追加 18 A1） |
+| 9 | `axilla_L` | 官方 CF | ∠(ElbowL, ShoulderL, HipR)，三維（官方以對側髖為「腋下角」的一邊） | ElbowL, ShoulderL, HipR | 度 | 否 |  |
+| 10 | `axilla_R` | 官方 CF | ∠(ElbowR, ShoulderR, HipL)，三維（官方以對側髖為「腋下角」的一邊） | ElbowR, ShoulderR, HipL | 度 | 否 |  |
+| 11 | `wrist_depth_L` | 官方 CF | WristL.z − ShoulderMid.z | WristL, ShoulderL, ShoulderR | 軀幹長 | 否 | 以共同骨架近似（SpineShoulder→ShoulderMid） |
+| 12 | `wrist_depth_R` | 官方 CF | WristR.z − ShoulderMid.z | WristR, ShoulderL, ShoulderR | 軀幹長 | 否 | 以共同骨架近似（SpineShoulder→ShoulderMid） |
+| 13 | `shoulder_width` | 官方 CF | |ShoulderL − ShoulderR|，三維 | ShoulderL, ShoulderR | 軀幹長 | 否 |  |
+| 14 | `hip_width` | 官方 CF | |HipL − HipR|，三維 | HipL, HipR | 軀幹長 | 否 |  |
+| 15 | `shoulder_flex_L` | 補充 | 上臂 ShoulderL→ElbowL 與向下軸 (−y) 的夾角，三維 | ShoulderL, ElbowL | 度 | 否 |  |
+| 16 | `shoulder_flex_R` | 補充 | 上臂 ShoulderR→ElbowR 與向下軸 (−y) 的夾角，三維 | ShoulderR, ElbowR | 度 | 否 |  |
 
-## Es3（15 項）
+## Es3（14 項）
 
 | # | 特徵 | 來源 | 公式 | 關節 | 單位 | 方向角 | 備註 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -59,15 +57,14 @@
 | 4 | `elbow_R` | 官方 CF | ∠(ShoulderR, ElbowR, WristR)，三維 | ShoulderR, ElbowR, WristR | 度 | 否 |  |
 | 5 | `knee_L` | 官方 CF | ∠(HipL, KneeL, AnkleL)，三維 | HipL, KneeL, AnkleL | 度 | 否 |  |
 | 6 | `knee_R` | 官方 CF | ∠(HipR, KneeR, AnkleR)，三維 | HipR, KneeR, AnkleR | 度 | 否 |  |
-| 7 | `angle_c_L` | 官方 CF | atan2(HipMid.x − HipL.x, HipMid.y − HipL.y) | HipL, HipR | 度 | 是 | 以共同骨架近似（SpineBase→HipMid） |
-| 8 | `angle_c_R` | 官方 CF | atan2(HipR.x − HipMid.x, HipR.y − HipMid.y) | HipL, HipR | 度 | 是 | 以共同骨架近似（SpineBase→HipMid） |
-| 9 | `arm_shoulder_L` | 官方 CF | ∠(ElbowL, ShoulderL, ShoulderMid)，三維 | ElbowL, ShoulderL, ShoulderR | 度 | 否 | 以共同骨架近似（SpineShoulder→ShoulderMid） |
-| 10 | `arm_shoulder_R` | 官方 CF | ∠(ElbowR, ShoulderR, ShoulderMid)，三維 | ElbowR, ShoulderR, ShoulderL | 度 | 否 | 以共同骨架近似（SpineShoulder→ShoulderMid） |
-| 11 | `axilla_L` | 官方 CF | ∠(ElbowL, ShoulderL, HipR)，三維（官方以對側髖為「腋下角」的一邊） | ElbowL, ShoulderL, HipR | 度 | 否 |  |
-| 12 | `axilla_R` | 官方 CF | ∠(ElbowR, ShoulderR, HipL)，三維（官方以對側髖為「腋下角」的一邊） | ElbowR, ShoulderR, HipL | 度 | 否 |  |
-| 13 | `wrist_height_L` | 官方 CF | 2·WristL.y − ElbowL.y − ShoulderL.y | WristL, ElbowL, ShoulderL | 軀幹長 | 否 |  |
-| 14 | `wrist_height_R` | 官方 CF | 2·WristR.y − ElbowR.y − ShoulderR.y | WristR, ElbowR, ShoulderR | 軀幹長 | 否 |  |
-| 15 | `hip_width` | 官方 CF | |HipL − HipR|，三維 | HipL, HipR | 軀幹長 | 否 |  |
+| 7 | `angle_c` | 官方 CF | atan2(HipMid.x − HipL.x, HipMid.y − HipL.y) | HipL, HipR | 度 | 是 | 以共同骨架近似（SpineBase→HipMid）；官方 angleHipL／angleHipR 近似後完全相同（HipMid 為兩髖中點），只保留一項（追加 18 A1） |
+| 8 | `arm_shoulder_L` | 官方 CF | ∠(ElbowL, ShoulderL, ShoulderMid)，三維 | ElbowL, ShoulderL, ShoulderR | 度 | 否 | 以共同骨架近似（SpineShoulder→ShoulderMid） |
+| 9 | `arm_shoulder_R` | 官方 CF | ∠(ElbowR, ShoulderR, ShoulderMid)，三維 | ElbowR, ShoulderR, ShoulderL | 度 | 否 | 以共同骨架近似（SpineShoulder→ShoulderMid） |
+| 10 | `axilla_L` | 官方 CF | ∠(ElbowL, ShoulderL, HipR)，三維（官方以對側髖為「腋下角」的一邊） | ElbowL, ShoulderL, HipR | 度 | 否 |  |
+| 11 | `axilla_R` | 官方 CF | ∠(ElbowR, ShoulderR, HipL)，三維（官方以對側髖為「腋下角」的一邊） | ElbowR, ShoulderR, HipL | 度 | 否 |  |
+| 12 | `wrist_height_L` | 官方 CF | 2·WristL.y − ElbowL.y − ShoulderL.y | WristL, ElbowL, ShoulderL | 軀幹長 | 否 |  |
+| 13 | `wrist_height_R` | 官方 CF | 2·WristR.y − ElbowR.y − ShoulderR.y | WristR, ElbowR, ShoulderR | 軀幹長 | 否 |  |
+| 14 | `hip_width` | 官方 CF | |HipL − HipR|，三維 | HipL, HipR | 軀幹長 | 否 |  |
 
 ## Es4（12 項）
 
@@ -103,7 +100,7 @@
 | 11 | `hip_R` | 補充 | ∠(ShoulderR, HipR, KneeR)，三維 | ShoulderR, HipR, KneeR | 度 | 否 |  |
 | 12 | `trunk_forward_lean` | 補充 | atan2(ShoulderMid.z − HipMid.z, ShoulderMid.y − HipMid.y)（矢狀面；負值 = 朝鏡頭前傾） | HipL, HipR, ShoulderL, ShoulderR | 度 | 是 |  |
 
-納入合計 **66** 項（含左右分開計）。
+納入合計 **63** 項（含左右分開計）。
 
 ## 列出但不納入的官方特徵
 
@@ -131,7 +128,8 @@
 
 ## 與官方腳本不同之處（實作上的選擇）
 
-1. 不做官方的 1 Hz Butterworth 低通濾波與頭尾裁切（前 10～30 幀、最後 15 幀）：摘要值改用 P95／P5，對單幀錯誤已較穩健；MediaPipe 有缺漏幀，`filtfilt` 無法直接套用。兩邊處理相同。
+1. 不套用官方的 1 Hz Butterworth 低通濾波與頭尾裁切（前 10～30 幀、最後 15 幀）（追加 18 A3）：摘要值用 P95／P5，已能降低單幀錯誤的影響；MediaPipe 有缺漏幀，雙向濾波（`filtfilt`）無法直接套用。Kinect 與 MediaPipe 處理相同。
+5. angle C：官方左右兩項以 HipMid 近似後數學上相同，只保留 `angle_c`（追加 18 A1）。
 2. ±180° 跳動：官方以「相鄰幀差 > 100° 時反號」處理；這裡 `shoulder_ext` 映射到 [−90°, 270°)、`knee_sag` 取 mod 360，讓舉臂過頭、深蹲時角度連續。
-3. Es3 主要動作量：官方程式是兩肘的 x 距離（`linkelbow = |Elbow_L.x − Elbow_R.x|`），圖例與註解寫 wrist；依程式用肘。
+3. Es3 主要動作量：官方程式是兩肘的 x 距離（`linkelbow = |Elbow_L.x − Elbow_R.x|`），圖例與註解寫 wrist；以程式為準用肘（追加 18 A2）。
 4. 長度、面積改以軀幹長為單位（正規化的結果），不是公尺。
