@@ -166,11 +166,20 @@ class TCN_GCN_unit(nn.Module):
 
 # graph module position model.graph
 class Model(nn.Module):
-    def __init__(self, num_class=1, num_point=25, num_person=1, in_channels=3, drop_out=0.2, init_bias=0.75, gc_type="alter", **kwargs):
+    def __init__(self, num_class=1, num_point=25, num_person=1, in_channels=3, drop_out=0.2, init_bias=0.75, gc_type="alter",
+                 graph="kimore25", **kwargs):
         super(Model, self).__init__()
         
-        # 載入 25 節點相鄰矩陣 (形狀: 3, 25, 25)
-        graph_obj = KimoreGraph()
+        # 載入相鄰矩陣：預設 Kinect 25 節點 (3, 25, 25)；graph="common17" 為 v7 共同骨架 (3, 17, 17)
+        if graph == "kimore25":
+            graph_obj = KimoreGraph()
+        elif graph == "common17":
+            from model.graph.common_17_graph import Graph as Common17Graph
+            graph_obj = Common17Graph()
+        else:
+            raise ValueError(f"未知的 graph: {graph}")
+        if graph_obj.num_node != num_point:
+            raise ValueError(f"graph {graph} 有 {graph_obj.num_node} 個節點，num_point={num_point}")
         A = torch.tensor(graph_obj.A, dtype=torch.float32, requires_grad=False)
         self.register_buffer('A', A)
         

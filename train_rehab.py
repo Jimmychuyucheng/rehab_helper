@@ -74,6 +74,9 @@ def parse_args():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--overfit", action="store_true")
     ap.add_argument("--device", default="auto")
+    ap.add_argument("--skeleton", choices=["kimore25", "common"], default="kimore25",
+                    help="common = v7 共同骨架 17 點（common_17_graph、樣本內存的 fold、17 點的左右對）；"
+                         "預設 kimore25 = v6 行為")
     args = ap.parse_args()
     targets = tuple(t.strip() for t in args.targets.split(",") if t.strip())
     if not targets or targets[0] != "ts" or len(set(targets)) != len(targets) \
@@ -254,9 +257,18 @@ def evaluate(model, loader, device, clip=False, targets=("ts",), all_targets=Fal
     return idx, yt, yp
 
 
+def skeleton_setup(args):
+    """回傳 (num_point, graph, fold_key, flip_pairs)；kimore25 = v6 行為 (fold_key、flip_pairs 為 None)。"""
+    if getattr(args, "skeleton", "kimore25") == "common":
+        from common_skeleton import COMMON_FLIP_PAIRS, NUM_COMMON
+        return NUM_COMMON, "common17", "fold", COMMON_FLIP_PAIRS
+    return 25, "kimore25", None, None
+
+
 def build_model(args, init_bias, device):
-    return Model(num_class=len(args.targets), num_point=25, in_channels=3, init_bias=init_bias,
-                 gc_type=args.gc_type).to(device)
+    num_point, graph, _, _ = skeleton_setup(args)
+    return Model(num_class=len(args.targets), num_point=num_point, in_channels=3, init_bias=init_bias,
+                 gc_type=args.gc_type, graph=graph).to(device)
 
 
 def make_criterion(args):
@@ -302,7 +314,7 @@ def recompute_bn(model, loader, device):
 # ==================== 過擬合測試 ====================
 def run_overfit(args, device, n_samples=16, steps=300):
     samples, _ = load_kimore(args.pkl)
-    split = make_split(samples, 0, 5, 0.15, 42)
+    split = make_split(samples, 0, 5, 0.15, 42, fold_key=skeleton_setup(args)[2])
     idx = split["train"][:n_samples]
     targets = args.targets
     ds = RehabDataset(samples, idx, train=True, crop_ratio=(1.0, 1.0), augmentor=no_augmentor(),
@@ -390,10 +402,12 @@ def run_fold(args, fold, device, baselines, extra_baselines=None):
     os.makedirs(out_dir, exist_ok=True)
     set_seed(args.seed + fold)
 
+    _, _, fold_key, flip_pairs = skeleton_setup(args)
     loaders, split, samples = build_dataloaders(
         args.pkl, fold, n_folds=5, val_ratio=0.15, seed=42, batch_size=args.batch_size,
         num_workers=0, out_frames=100, targets=args.targets, crop_ratio=(0.4, 0.6),
-        eval_windows=5, eval_crop_ratio=0.5, augmentor=no_augmentor() if args.no_aug else None)
+        eval_windows=5, eval_crop_ratio=0.5, augmentor=no_augmentor() if args.no_aug else None,
+        fold_key=fold_key, flip_pairs=flip_pairs)
 
     targets = args.targets
     multi = is_multitask(targets)
@@ -653,8 +667,10 @@ def main():
 
     folds = [int(k) for k in args.folds.split(",")]
     samples, _ = load_kimore(args.pkl)
-    baselines = mean_baseline(samples, n_folds=5)["per_fold"]
-    extra_baselines = {t: mean_baseline(samples, n_folds=5, target=t)["per_fold"] for t in args.targets[1:]}
+    fold_key = skeleton_setup(args)[2]
+    baselines = mean_baseline(samples, n_folds=5, fold_key=fold_key)["per_fold"]
+    extra_baselines = {t: mean_baseline(samples, n_folds=5, target=t, fold_key=fold_key)["per_fold"]
+                       for t in args.targets[1:]}
     os.makedirs(os.path.join("runs", args.name), exist_ok=True)
     results = [run_fold(args, k, device, baselines, extra_baselines) for k in folds]
     write_summary(args, results)

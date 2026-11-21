@@ -79,13 +79,24 @@ def make_subject_folds(samples, n_folds=5, seed=42):
     return folds
 
 
-def make_split(samples, fold, n_folds=5, val_ratio=0.15, seed=42):
+def make_split(samples, fold, n_folds=5, val_ratio=0.15, seed=42, fold_key=None):
     """
     回傳 {"train": [idx...], "val": [idx...], "test": [idx...]}，索引對應 samples。
     同一位受試者的所有動作只會出現在其中一個集合。
+    fold_key=None（預設，v6 行為）：由 make_subject_folds 對 samples 重新分配受試者。
+    fold_key="fold"（v7 追加 8 A）：test = 樣本內存的 s[fold_key] == fold 的受試者，不重新分配；
+        val 仍依原本作法從其餘受試者分層抽出。
     """
-    folds = make_subject_folds(samples, n_folds, seed)
-    test_subj = folds[fold]
+    if fold_key is None:
+        folds = make_subject_folds(samples, n_folds, seed)
+        test_subj = folds[fold]
+    else:
+        subj_fold = {}
+        for s in samples:
+            f = s[fold_key]
+            if subj_fold.setdefault(s["subject_key"], f) != f:
+                raise ValueError(f"受試者 {s['subject_key']} 的樣本分在不同 fold")
+        test_subj = {k for k, f in subj_fold.items() if f == fold}
 
     rng = random.Random(seed + 1000 + fold)
     rest = [s for s in samples if s["subject_key"] not in test_subj]
@@ -251,9 +262,13 @@ def predict_windows(model_fn, x):
 def build_dataloaders(pkl_path, fold, n_folds=5, val_ratio=0.15, seed=42,
                       batch_size=8, num_workers=0, out_frames=100, targets=("ts",),
                       crop_ratio=(0.4, 0.6), eval_windows=5, eval_crop_ratio=0.5,
-                      augmentor=None, exercises=None):
+                      augmentor=None, exercises=None, fold_key=None, flip_pairs=None):
+    """fold_key：見 make_split；flip_pairs：非 None 且 augmentor 為 None 時，訓練增強改用這組左右對
+    （共同骨架 17 點用）。兩者預設 None = v6 行為。"""
     samples, _ = load_kimore(pkl_path)
-    split = make_split(samples, fold, n_folds, val_ratio, seed)
+    split = make_split(samples, fold, n_folds, val_ratio, seed, fold_key=fold_key)
+    if augmentor is None and flip_pairs is not None:
+        augmentor = SkeletonAugmentor(flip_pairs=flip_pairs)
     common = dict(out_frames=out_frames, targets=targets, exercises=exercises)
 
     train_ds = RehabDataset(samples, split["train"], train=True, crop_ratio=crop_ratio,
@@ -275,7 +290,7 @@ def build_dataloaders(pkl_path, fold, n_folds=5, val_ratio=0.15, seed=42,
 
 
 # ==================== 第一步驗證：平均值 baseline ====================
-def mean_baseline(samples, n_folds=5, val_ratio=0.15, seed=42, target="ts"):
+def mean_baseline(samples, n_folds=5, val_ratio=0.15, seed=42, target="ts", fold_key=None):
     """
     兩種「不看骨架」的猜法，模型必須明顯贏過它們才代表有學到東西：
       global : 一律猜訓練集平均
@@ -284,7 +299,7 @@ def mean_baseline(samples, n_folds=5, val_ratio=0.15, seed=42, target="ts"):
     """
     rows = []
     for k in range(n_folds):
-        split = make_split(samples, k, n_folds, val_ratio, seed)
+        split = make_split(samples, k, n_folds, val_ratio, seed, fold_key=fold_key)
         tr = [samples[i] for i in split["train"] + split["val"]]
         te = [samples[i] for i in split["test"]]
         g = np.mean([s[target] for s in tr])
