@@ -16,8 +16,8 @@ Q1（第 3.6 節）：每部影片 v、每個 seed s，用 v 所在測試折的 
   - K_common ：Kinect，共同參考幀正規化（追加 8 B）。
   - M        ：MediaPipe，共同參考幀正規化；未偵測的幀線性內插（追加 7 D，fill_undetected）。
   - M_swap   ：追加 11 E 敏感度分析——以 Kinect 為參考，把 MediaPipe 左右標反的幀左右換回後再預測。
-               追加 17 B：上半身（肩、肘、腕）依肩與腕、下半身（髖、膝、踝、腳）依髖與踝，各自逐幀判斷：
-               交叉配對的 x、y 距離和比同側小 → 該部位左右對調（未正規化、逐幀減 HipMid 的相機座標，同 align.lr_flip）。
+               追加 18 B：肩、肘、腕、髖、膝、踝、腳 7 對關節各自逐幀判斷：該對的交叉配對 x、y 距離和比同側小 → 該對
+               左右對調（未正規化、逐幀減 HipMid 的相機座標，同 align.lr_flip）。
                只用於「若左右判斷正確時的落差」，不參與判定。
   追加 8 B 的檢查量 |K_own − K_common| 逐部列出；中位數與 N/2 的比較在彙整時做。
 Q2／Q3（第 3.7 節；特徵定義見 features_v7.py 與 docs/v7_feature_list.md，追加 17 A、18 A）：
@@ -28,6 +28,8 @@ Q2／Q3（第 3.7 節；特徵定義見 features_v7.py 與 docs/v7_feature_list.
     不可靠者 frame_mae = NaN（仍輸出摘要值）。
   - 角度差的週期性：方向角（旋轉、傾角）以 (M − K + 180) mod 360 − 180 計算差值。
   - 追加 11 E：M_swap_rom／M_swap_peak／frame_mae_swap = 左右標反幀換回後的同一組量（敏感度分析，不參與判定）。
+  - 換回在相機座標（正規化之前）進行，再以同一組參考幀正規化；ref_lr_flipped = MediaPipe 參考幀的髖過半標反
+    （主分析不校正時，這類影片的 MediaPipe 正規化左右軸與 Kinect 相反）。
 
 輸出（--out，預設 runs/v7_gap/）：
   paired_preds.csv  每部影片 × 模型 × seed：K_own、K_t5、K_common、M、M_swap、左右對調幀比例、覆蓋率、截掉行數…
@@ -101,41 +103,31 @@ def predict(x_tvc, seed, fold, device):
     return float(out.clamp(TS_MIN / TS_MAX, 1.0).item() * TS_MAX)
 
 
-# ---------------------------------------------------------------- 左右對調（追加 11 E、17 B）
-SWAP_PARTS = {   # 部位: (判斷用的關節對, 對調的關節對)
-    "upper": (["Shoulder", "Wrist"], ["Shoulder", "Elbow", "Wrist"]),
-    "lower": (["Hip", "Ankle"], ["Hip", "Knee", "Ankle", "Foot"]),
-}
+# ---------------------------------------------------------------- 左右對調（追加 11 E、18 B）
+SWAP_PAIRS = ["Shoulder", "Elbow", "Wrist", "Hip", "Knee", "Ankle", "Foot"]
 
 
 def lr_swap_frames(Ka, Mc):
     """
-    追加 17 B：上半身、下半身各自逐幀判斷。判斷用的關節對（上：肩、腕；下：髖、踝）合計的 x、y 距離，
-    交叉配對 < 同側配對 → 該部位對調。Ka、Mc：(T,17,3) 逐幀減 HipMid、未正規化。
-    回傳 {部位: (對調 bool, 可判斷 bool)}。
+    追加 18 B（取代 17 B）：7 對關節各自逐幀判斷——該對關節的 x、y 距離，交叉配對 < 同側配對 → 該對對調。
+    Ka、Mc：(T,17,3) 逐幀減 HipMid、未正規化。回傳 {關節對: (對調 bool, 可判斷 bool)}。
     """
     d = lambda u, v: np.linalg.norm(u - v, axis=1)
     out = {}
-    for part, (judge, _) in SWAP_PARTS.items():
-        same = cross = 0.0
-        ok = np.ones(len(Mc), bool)
-        for p in judge:
-            kl, kr = Ka[:, J[p + "L"], :2], Ka[:, J[p + "R"], :2]
-            ml, mr = Mc[:, J[p + "L"], :2], Mc[:, J[p + "R"], :2]
-            ok &= np.isfinite(kl[:, 0]) & np.isfinite(kr[:, 0]) & np.isfinite(ml[:, 0]) & np.isfinite(mr[:, 0])
-            same = same + d(ml, kl) + d(mr, kr)
-            cross = cross + d(ml, kr) + d(mr, kl)
-        out[part] = (ok & (cross < same), ok)
+    for p in SWAP_PAIRS:
+        kl, kr = Ka[:, J[p + "L"], :2], Ka[:, J[p + "R"], :2]
+        ml, mr = Mc[:, J[p + "L"], :2], Mc[:, J[p + "R"], :2]
+        ok = np.isfinite(kl[:, 0]) & np.isfinite(kr[:, 0]) & np.isfinite(ml[:, 0]) & np.isfinite(mr[:, 0])
+        out[p] = (ok & (d(ml, kr) + d(mr, kl) < d(ml, kl) + d(mr, kr)), ok)
     return out
 
 
 def swap_lr(X, swaps):
-    """swaps：lr_swap_frames 的輸出；各部位只對調自己的關節對。"""
+    """swaps：lr_swap_frames 的輸出；每對關節只在自己判定對調的幀對調。"""
     X = X.copy()
-    for part, (frames, _) in swaps.items():
-        for p in SWAP_PARTS[part][1]:
-            a, b = J[p + "L"], J[p + "R"]
-            X[frames, a], X[frames, b] = X[frames, b].copy(), X[frames, a].copy()
+    for p, (frames, _) in swaps.items():
+        a, b = J[p + "L"], J[p + "R"]
+        X[frames, a], X[frames, b] = X[frames, b].copy(), X[frames, a].copy()
     return X
 
 
@@ -166,7 +158,12 @@ def run_video(key, ks, mps, al, t5, device):
         assert kj.min() >= 0 and kj.max() < len(seg_K), (key, m, kj.min(), kj.max(), len(seg_K))
         Ka_c = seg_K[kj]                                                            # 未正規化、逐幀減 HipMid
         swaps = lr_swap_frames(Ka_c, Mseg)
-        Mswap = cs.fill_undetected(swap_lr(Mn, swaps), det)
+        # 追加 11 E／18 B 敏感度分析：先在相機座標換回左右，再用同一組參考幀正規化
+        # （參考幀本身左右標反時，正規化的左右軸會整個反過來，換回必須在正規化之前）
+        Msw_raw, vis_sw = swap_lr(Mseg, swaps), swap_lr(vis, swaps)
+        Mn_sw, _ = cs.normalize(Msw_raw, ref_idx=ref_v - lo)
+        Mswap = cs.fill_undetected(Mn_sw, det)
+        ref_sw = {p: float(f[ref_v - lo].mean()) for p, (f, _) in swaps.items()}
         c.update(status="ok", n_seg_video=hi - lo, n_kinect=len(seg_K), seg_video_first=lo, seg_video_last=hi - 1,
                  map_rows_first=int(rows[0]), map_rows_last=int(rows[-1]), raw_start=raw0, raw_end=int(ks["raw_end"]),
                  n_seg_truncated=int(r.n_seg_truncated), kinect_coverage=float(r.kinect_coverage),
@@ -175,7 +172,9 @@ def run_video(key, ks, mps, al, t5, device):
                  ref_hipmid_K=float(np.abs(np.median(Kn[pk["ref_idx"], J["HipMid"]], 0)).max()),
                  ref_hipmid_M=float(np.abs(np.median(Mn[pm["ref_idx"], J["HipMid"]], 0)).max()),
                  **{f"swap_{p}_frac": float(f[ok].mean()) if ok.any() else np.nan for p, (f, ok) in swaps.items()},
-                 **{f"swap_{p}_n": int(ok.sum()) for p, (f, ok) in swaps.items()})
+                 **{f"swap_{p}_n": int(ok.sum()) for p, (f, ok) in swaps.items()},
+                 ref_swap_hip=ref_sw["Hip"], ref_swap_shoulder=ref_sw["Shoulder"],
+                 ref_lr_flipped=bool(ref_sw["Hip"] > 0.5))
         chk.append(c)
 
         # ---- Q1
@@ -187,13 +186,16 @@ def run_video(key, ks, mps, al, t5, device):
                            K_t5=float(t5[(s, f)].loc[ks["_idx"], "y_pred"]),
                            K_own=predict(K_own, s, f, device), K_common=predict(Kn, s, f, device),
                            M=predict(Mfill, s, f, device), M_swap=predict(Mswap, s, f, device),
-                           swap_upper_frac=c["swap_upper_frac"], swap_lower_frac=c["swap_lower_frac"]))
+                           ref_lr_flipped=c["ref_lr_flipped"],
+                           **{f"swap_{p}_frac": c[f"swap_{p}_frac"] for p in SWAP_PAIRS}))
 
         # ---- Q2／Q3
         Mmask = Mn.copy()
         Mmask[~det] = np.nan
         Mmask[vis < cs.VIS_THRESHOLD] = np.nan                                    # 追加 7 D
-        Mmask_sw = swap_lr(Mmask, swaps)                                           # 追加 11 E 敏感度分析
+        Mmask_sw = Mn_sw.copy()                                                    # 追加 11 E 敏感度分析
+        Mmask_sw[~det] = np.nan
+        Mmask_sw[vis_sw < cs.VIS_THRESHOLD] = np.nan
         for fname, (fn, joints, is_dir) in FEATURES[ks["exercise"]].items():
             ak, am, asw = fn(Kn), fn(Mmask), fn(Mmask_sw)
             vm = float(np.isfinite(am).mean())
@@ -211,14 +213,14 @@ def run_video(key, ks, mps, al, t5, device):
                             frame_n=int(both.sum()), M_swap_rom=rsw, M_swap_peak=psw,
                             frame_mae_swap=float(np.abs(dsw[bsw]).mean()) if (r.reliable and bsw.sum()) else np.nan,
                             reliable=bool(r.reliable), method=r.method, rho=float(r.rho),
-                            fps=float(r.fps), mirrored=bool(r.mirrored)))
+                            fps=float(r.fps), mirrored=bool(r.mirrored), ref_lr_flipped=c["ref_lr_flipped"]))
     return pp, ang, chk
 
 
 def main():
     import pickle
     ap = argparse.ArgumentParser()
-    ap.add_argument("--keys", required=True, help="逗號分隔；main = 主分析集（qc_hflip.main_set_final）")
+    ap.add_argument("--keys", required=True, help="逗號分隔；main = 主分析集（qc_hflip.main_set_final）；all = 347 部")
     ap.add_argument("--out", default="runs/v7_gap")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
@@ -226,9 +228,9 @@ def main():
     kidx = {s["key"]: i for i, s in enumerate(K)}
     MP = {m: {s["key"]: s for s in pickle.load(open(MP_PKL.format(m=m), "rb"))["samples"]} for m in MODELS}
     al = pd.read_csv(ALIGN_ALL).set_index(["key", "model"])
-    if args.keys == "main":
+    if args.keys in ("main", "all"):
         q = pd.read_csv(QC_HFLIP, index_col=0)
-        keys = [k for k in q.index[q.main_set_final.astype(bool)]]
+        keys = [k for k in q.index[q.main_set_final.astype(bool)]] if args.keys == "main" else [s["key"] for s in K]
     else:
         keys = args.keys.split(",")
     t5 = {(s, f): pd.read_csv(T5_PRED.format(s=s, f=f)).set_index("index") for s in SEEDS for f in range(5)}
