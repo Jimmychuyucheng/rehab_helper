@@ -85,7 +85,7 @@ class TestMapping(unittest.TestCase):
 
     def test_kinect_indices(self):
         x = np.arange(25 * 3, dtype=np.float32).reshape(1, 25, 3)
-        c = cs.kinect_to_common(x)[0]
+        c = cs.kinect_to_common(x, center=False)[0]
         self.assertEqual(c.shape, (17, 3))
         for name, src in [("ShoulderL", 4), ("ShoulderR", 8), ("WristL", 6), ("WristR", 10), ("Head", 3),
                           ("HipL", 12), ("HipR", 16), ("FootL", 15), ("FootR", 19)]:
@@ -98,7 +98,7 @@ class TestMapping(unittest.TestCase):
         x = rng.normal(size=(2, 33, 3)).astype(np.float32)
         vis = np.ones((2, 33), np.float32)
         vis[1, 24] = 0.3            # 右髖看不到 → HipR 與 HipMid 都缺
-        c, cv = cs.mediapipe_to_common(x, vis)
+        c, cv = cs.mediapipe_to_common(x, vis, center=False)
         np.testing.assert_allclose(c[0, J["WristL"]], x[0, 15] * [-1, -1, 1])
         np.testing.assert_allclose(c[0, J["Head"]], (x[0, 7] + x[0, 8]) / 2 * [-1, -1, 1], rtol=1e-6)
         np.testing.assert_allclose(c[0, J["FootR"]], x[0, 32] * [-1, -1, 1])
@@ -186,19 +186,20 @@ class TestRealData(unittest.TestCase):
                     self.assertLess(err, 1e-6, f"{key} {mid}")
 
     def test_4_normalize_expert_standing(self):
-        """清單 4：專家（E_ID14 Es2）正規化後 HipMid→ShoulderMid 中位數 = 1、開頭 10 幀 HipMid 平均在原點；兩邊都測。"""
+        """清單 4：專家（E_ID14 Es2）正規化後 HipMid→ShoulderMid 中位數 = 1、參考幀 HipMid 中位數在原點；兩邊都測。"""
         d = real("E_ID14_Es2")
         for name, X in [("Kinect", d["Kc"]), ("MediaPipe", cs.fill_short_gaps(d["Mc"])[0])]:
             N, p = cs.normalize(X)
             torso = np.linalg.norm(N[:, J["ShoulderMid"]] - N[:, J["HipMid"]], axis=-1)
             self.assertAlmostEqual(float(np.nanmedian(torso)), 1.0, places=5, msg=name)
-            np.testing.assert_allclose(N[p["ref_idx"], J["HipMid"]].mean(axis=0), 0, atol=1e-5, err_msg=name)
+            np.testing.assert_allclose(np.median(N[p["ref_idx"], J["HipMid"]], axis=0), 0, atol=1e-5, err_msg=name)
             R = p["R"].astype(np.float64)
             np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-5)
             self.assertAlmostEqual(float(np.linalg.det(R)), 1.0, places=5)
-            ref = N[p["ref_idx"]]
-            up = (ref[:, J["ShoulderMid"]] - ref[:, J["HipMid"]]).mean(axis=0)
-            lat = (ref[:, J["HipR"]] - ref[:, J["HipL"]]).mean(axis=0)
+            # 中位數逐分量計算、與旋轉不可交換，所以在正規化前的座標檢查：R 把參考幀向量的中位數轉到 +y / xy 平面
+            raw = np.asarray(X, dtype=np.float64)[p["ref_idx"]]
+            up = R @ np.median(raw[:, J["ShoulderMid"]] - raw[:, J["HipMid"]], axis=0)
+            lat = R @ np.median(raw[:, J["HipR"]] - raw[:, J["HipL"]], axis=0)
             self.assertLess(np.abs(up[[0, 2]]).max(), 1e-5)
             self.assertGreater(up[1], 0)
             # 垂直軸精確；左右軸經 Gram-Schmidt 投影，所以髖連線只保證 z 分量為 0（y 分量 = 髖與軀幹不垂直的程度）
@@ -242,6 +243,96 @@ class TestRealData(unittest.TestCase):
             aligned, _ = pk.body_centric_alignment(seg)
             v3 = samples[d["sample_id"]]["skeleton"].transpose(1, 2, 0)
             self.assertLess(float(np.abs(aligned - v3).max()), 1e-5, key)
+
+
+class TestAddendum7(unittest.TestCase):
+    """追加 7 B（參考幀、中位數）、C（逐幀減 HipMid）、D（未偵測幀補齊）。"""
+
+    @staticmethod
+    def _standing(T=30, seed=0):
+        """合成站姿：HipL/R 左右各 0.1 m、ShoulderMid 在上方 0.5 m，加一點雜訊與整體平移。"""
+        rng = np.random.default_rng(seed)
+        x = np.zeros((T, 17, 3))
+        x[:, J["HipL"]] = [-0.1, 0, 0]
+        x[:, J["HipR"]] = [0.1, 0, 0]
+        x[:, J["ShoulderL"]] = [-0.18, 0.5, 0]
+        x[:, J["ShoulderR"]] = [0.18, 0.5, 0]
+        x[:, J["HipMid"]] = (x[:, J["HipL"]] + x[:, J["HipR"]]) / 2
+        x[:, J["ShoulderMid"]] = (x[:, J["ShoulderL"]] + x[:, J["ShoulderR"]]) / 2
+        x += rng.normal(scale=0.002, size=x.shape) + np.linspace(0, 0.3, T)[:, None, None] * [1, 0, 0.5]
+        return x.astype(np.float32)
+
+    def test_center_kinect(self):
+        x = np.random.default_rng(1).normal(size=(5, 25, 3)).astype(np.float32)
+        c = cs.kinect_to_common(x)
+        np.testing.assert_allclose(c[:, J["HipMid"]], 0, atol=1e-7)
+        np.testing.assert_allclose(c[:, J["HipL"]], -c[:, J["HipR"]], atol=1e-6)
+        raw = cs.kinect_to_common(x, center=False)
+        np.testing.assert_allclose(c, raw - raw[:, [J["HipMid"]]], atol=1e-6)
+
+    def test_center_before_mask_mediapipe(self):
+        """MediaPipe 先用輸出的髖座標置中再遮罩：髖 visibility 低時其他點仍保留；vis_threshold=None 不遮罩。"""
+        x = np.random.default_rng(2).normal(size=(3, 33, 3)).astype(np.float32)
+        vis = np.ones((3, 33), np.float32)
+        vis[1, 23] = 0.2
+        c, _ = cs.mediapipe_to_common(x, vis)
+        self.assertTrue(np.isnan(c[1, J["HipMid"]]).all() and np.isnan(c[1, J["HipL"]]).all())
+        self.assertTrue(np.isfinite(c[1, J["WristL"]]).all())
+        mid = (x[1, 23] + x[1, 24]) / 2 * [-1, -1, 1]
+        np.testing.assert_allclose(c[1, J["WristL"]], x[1, 15] * [-1, -1, 1] - mid, atol=1e-6)
+        c2, _ = cs.mediapipe_to_common(x, vis, vis_threshold=None)
+        self.assertTrue(np.isfinite(c2).all())
+        np.testing.assert_allclose(c2[:, J["HipMid"]], 0, atol=1e-7)
+
+    def test_fill_undetected(self):
+        x = np.arange(6 * 17 * 3, dtype=np.float32).reshape(6, 17, 3)
+        det = np.array([False, True, False, False, True, False])
+        y = x.copy()
+        y[~det] = np.nan
+        f = cs.fill_undetected(y, det)
+        np.testing.assert_array_equal(f[det], x[det])
+        np.testing.assert_array_equal(f[0], x[1])                       # 頭：最近的有效幀
+        np.testing.assert_array_equal(f[5], x[4])                       # 尾
+        np.testing.assert_allclose(f[2], x[1] + (x[4] - x[1]) / 3, rtol=1e-6)
+        with self.assertRaises(ValueError):
+            cs.fill_undetected(y, np.zeros(6, bool))
+
+    def test_normalize_ref_idx_and_median(self):
+        x = self._standing()
+        N_auto, p_auto = cs.normalize(x)
+        self.assertEqual(p_auto["ref_idx"], list(range(10)))
+        ref = list(range(5, 15))
+        N, p = cs.normalize(x, ref_idx=ref)
+        self.assertEqual(p["ref_idx"], ref)
+        np.testing.assert_allclose(np.median(N[ref, J["HipMid"]], axis=0), 0, atol=1e-5)
+        # 中位數：參考幀中 1 幀壞掉（髖連線轉 90°），方向幾乎不變
+        bad = x.copy()
+        bad[7, J["HipL"]], bad[7, J["HipR"]] = [0, 0, -0.1], [0, 0, 0.1]
+        bad[7, J["HipMid"]] = 0
+        _, pb = cs.normalize(bad, ref_idx=ref)
+        ang = np.degrees(np.arccos(np.clip(np.dot(pb["R"][0], p["R"][0]), -1, 1)))
+        self.assertLess(ang, 2.0)
+        # 參考幀不合格 → ValueError（「無有效參考幀」由呼叫端記錄）
+        nan = x.copy()
+        nan[6, J["ShoulderMid"]] = np.nan
+        with self.assertRaises(ValueError):
+            cs.normalize(nan, ref_idx=ref)
+        with self.assertRaises(ValueError):
+            cs.normalize(x, ref_idx=ref[:9])
+
+    @unittest.skipUnless(HAVE_DATA, "缺 T1 試跑資料或 v3_crop_index.csv")
+    def test_real_center_fill(self):
+        for key in T1_KEYS:
+            d = real(key)
+            Kc = d["Kc"]
+            ok = np.isfinite(Kc[:, 0, 0])
+            np.testing.assert_allclose(Kc[ok, J["HipMid"]], 0, atol=1e-6)
+            z = np.load(f"{TRIAL}/{key}.npz")
+            Mraw, _ = cs.mediapipe_to_common(z["world"], z["visibility"], vis_threshold=None)
+            self.assertTrue(np.isfinite(Mraw[z["detected"]]).all(), key)
+            F = cs.fill_undetected(Mraw, z["detected"])
+            self.assertTrue(np.isfinite(F).all(), key)
+            np.testing.assert_array_equal(F[z["detected"]], Mraw[z["detected"]])
 
 
 class TestGraph(unittest.TestCase):

@@ -5,7 +5,8 @@ v7 第 3.2 節：Kinect v2（25 點）與 MediaPipe Pose（33 點）轉成同一
   共同骨架沿用 Kinect 相機座標的軸向：y 向上；左肩 x < 右肩 x；z 越小越靠近鏡頭。
   MediaPipe world 轉換為 (x, y, z) → (-x, -y, z)：y 原本向下；x 原本左肩 > 右肩；z 原本就是越小越近。
   這是繞 z 軸轉 180°，座標系左右手性不變。
-  注意：MediaPipe world 每幀以髖部中點為原點，骨盆的整體位移不存在；Kinect 則保留相機座標中的位移。
+  追加 7 C：MediaPipe world 每幀以髖部中點為原點、沒有骨盆整體位移，所以兩邊都逐幀減去 HipMid
+  （center=True，預設），輸入資訊一致。依賴骨盆位移的特徵兩邊不可比。
 
 Kinect 幀的座標一律是原始 CSV 行號（追加 2 C）：load_kinect_raw() 回傳 (n_raw, 25, 3)，
 v3 保留段 [start, end) 以外為 NaN；影片第 i 幀 ↔ 原始 CSV 第 i + k 行。
@@ -55,28 +56,56 @@ def _gather(x, src):
     return np.stack(out, axis=1)
 
 
-def kinect_to_common(x25):
-    """(T, 25, 3) Kinect 相機座標 → (T, 17, 3)。NaN 原樣傳遞。"""
+def center_on_hipmid(x17):
+    """追加 7 C：逐幀減去 HipMid（HipMid 本身變成 0）。"""
+    x17 = np.asarray(x17, dtype=np.float32)
+    return (x17 - x17[:, J["HipMid"]:J["HipMid"] + 1]).astype(np.float32)
+
+
+def kinect_to_common(x25, center=True):
+    """(T, 25, 3) Kinect 相機座標 → (T, 17, 3)；center=True 時逐幀減去 HipMid。NaN 原樣傳遞。"""
     x25 = np.asarray(x25, dtype=np.float32)
     assert x25.ndim == 3 and x25.shape[1:] == (25, 3), x25.shape
-    return _gather(x25, KINECT_SRC).astype(np.float32)
+    x = _gather(x25, KINECT_SRC).astype(np.float32)
+    return center_on_hipmid(x) if center else x
 
 
-def mediapipe_to_common(x33, visibility, vis_threshold=VIS_THRESHOLD):
+def mediapipe_to_common(x33, visibility, vis_threshold=VIS_THRESHOLD, center=True):
     """
     (T, 33, 3) pose_world_landmarks、(T, 33) visibility → ((T, 17, 3), (T, 17) visibility)。
-    軸向轉成 Kinect 的方向；中點的 visibility 取兩端點的最小值；visibility < 門檻的點設為 NaN。
-    （偵測失敗的幀 world 本來就是 NaN、visibility 為 0。）
+    軸向轉成 Kinect 的方向；中點的 visibility 取兩端點的最小值；center=True 時逐幀減去 HipMid
+    （在遮罩前做，用 MediaPipe 輸出的髖座標）。
+    vis_threshold：visibility 低於此值的點設為 NaN（角度特徵用，追加 7 D）；None = 不遮罩
+    （模型輸入用：偵測到的幀一律使用輸出座標）。偵測失敗的幀 world 本來就是 NaN、visibility 為 0。
     """
     x33 = np.asarray(x33, dtype=np.float32) * MP_TO_KINECT_AXES
     visibility = np.asarray(visibility, dtype=np.float32)
     assert x33.ndim == 3 and x33.shape[1:] == (33, 3), x33.shape
     assert visibility.shape == x33.shape[:2], visibility.shape
     x = _gather(x33, MP_SRC)
+    if center:
+        x = center_on_hipmid(x)
     vis = np.stack([np.minimum(visibility[:, s[0]], visibility[:, s[1]]) if isinstance(s, tuple)
                     else visibility[:, s] for s in MP_SRC], axis=1)
-    x[vis < vis_threshold] = np.nan
+    if vis_threshold is not None:
+        x[vis < vis_threshold] = np.nan
     return x.astype(np.float32), vis.astype(np.float32)
+
+
+def fill_undetected(x, detected):
+    """
+    追加 7 D（模型輸入）：沒偵測到的幀線性內插補齊，頭尾用最近的有效幀延伸。
+    x: (T, V, 3)，detected: (T,) bool。偵測到的幀原樣保留。
+    """
+    x = np.array(x, dtype=np.float32, copy=True)
+    detected = np.asarray(detected, dtype=bool)
+    if not detected.any():
+        raise ValueError("沒有任何偵測到的幀")
+    t, good = np.arange(len(x)), np.flatnonzero(detected)
+    for v in range(x.shape[1]):
+        for c in range(3):
+            x[~detected, v, c] = np.interp(t[~detected], good, x[good, v, c])   # np.interp 在頭尾取端點值
+    return x
 
 
 def fill_short_gaps(x, max_gap=MAX_SHORT_GAP):
@@ -113,25 +142,34 @@ def fill_short_gaps(x, max_gap=MAX_SHORT_GAP):
     return x, info
 
 
-def normalize(x17, ref_frames=REF_FRAMES):
+def normalize(x17, ref_idx=None, ref_frames=REF_FRAMES):
     """
-    第 3.2 節正規化，Kinect 與 MediaPipe 完全相同：
-      原點 = 開頭 ref_frames 幀 HipMid 的平均；
-      方向 = 同樣幀的 HipL→HipR 定左右軸 (x)、HipMid→ShoulderMid 定垂直軸 (y)，Gram-Schmidt 正交化，z = x × y；
+    第 3.2 節正規化（依追加 7 B 修改），Kinect 與 MediaPipe 完全相同：
+      原點 = 參考幀 HipMid 的中位數；
+      方向 = 參考幀 HipL→HipR 向量的中位數定左右軸 (x)、HipMid→ShoulderMid 向量的中位數定垂直軸 (y)，
+             Gram-Schmidt 正交化，z = x × y；
       尺度 = 整段 HipMid→ShoulderMid 長度的中位數。
-    「開頭 ref_frames 幀」取 HipMid、ShoulderMid、HipL、HipR 都有值的前 ref_frames 幀
-    （Kinect 依原始 CSV 行號排列時，開頭是 v3 保留段以外的 NaN 行；MediaPipe 開頭可能偵測失敗）。
+    ref_idx：參考幀（陣列 index）。追加 7 B 的配對用參考幀 = Kinect 保留段開頭起算、兩邊都有效的前 10 幀，
+             由 T6 依對應關係算好後傳入；給定時必須全部有效、且恰為 ref_frames 幀，否則丟出 ValueError
+             （「無有效參考幀」由呼叫端記入 excluded.csv）。
+             None：取 HipMid、ShoulderMid、HipL、HipR 都有值的前 ref_frames 幀（單邊使用，例如 T5 的 Kinect 訓練資料）。
     回傳 (T, 17, 3) 與參數 dict（origin、R (3×3, 列為新軸)、scale、ref_idx）。
     """
     x17 = np.asarray(x17, dtype=np.float64)
     need = [J["HipMid"], J["ShoulderMid"], J["HipL"], J["HipR"]]
-    valid = np.flatnonzero(np.all(np.isfinite(x17[:, need, 0]), axis=1))
-    if len(valid) == 0:
-        raise ValueError("沒有任何幀同時有 HipMid、ShoulderMid、HipL、HipR")
-    ref = x17[valid[:ref_frames]]
-    origin = ref[:, J["HipMid"]].mean(axis=0)
-    lateral = (ref[:, J["HipR"]] - ref[:, J["HipL"]]).mean(axis=0)
-    vertical = (ref[:, J["ShoulderMid"]] - ref[:, J["HipMid"]]).mean(axis=0)
+    ok = np.all(np.isfinite(x17[:, need, 0]), axis=1)
+    if ref_idx is None:
+        ref_idx = np.flatnonzero(ok)[:ref_frames]
+        if len(ref_idx) == 0:
+            raise ValueError("沒有任何幀同時有 HipMid、ShoulderMid、HipL、HipR")
+    else:
+        ref_idx = np.asarray(ref_idx, dtype=int)
+        if len(ref_idx) != ref_frames or not ok[ref_idx].all():
+            raise ValueError(f"參考幀須為 {ref_frames} 個有效幀，收到 {len(ref_idx)} 個、有效 {int(ok[ref_idx].sum())} 個")
+    ref = x17[ref_idx]
+    origin = np.median(ref[:, J["HipMid"]], axis=0)
+    lateral = np.median(ref[:, J["HipR"]] - ref[:, J["HipL"]], axis=0)
+    vertical = np.median(ref[:, J["ShoulderMid"]] - ref[:, J["HipMid"]], axis=0)
     ey = vertical / np.linalg.norm(vertical)
     ex = lateral - lateral.dot(ey) * ey
     ex /= np.linalg.norm(ex)
@@ -141,7 +179,7 @@ def normalize(x17, ref_frames=REF_FRAMES):
     scale = float(np.nanmedian(torso))
     out = (x17 - origin) @ R.T / scale
     return out.astype(np.float32), {"origin": origin.astype(np.float32), "R": R.astype(np.float32),
-                                    "scale": scale, "ref_idx": valid[:ref_frames].tolist()}
+                                    "scale": scale, "ref_idx": [int(i) for i in ref_idx]}
 
 
 def common_adjacency():
