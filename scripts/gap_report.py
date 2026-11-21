@@ -25,6 +25,7 @@ Q3（第 4.3 節）：Es3 trunk_rotation 的 ROM；Pearson r、隨機誤差 SD(M
   對照組「撐不住」→ Q3 不判定。
 
     python scripts/gap_report.py
+（若已先跑 scripts/gap_explore.py，會把 runs/v7_gap/explore/explore.md 接在最後作為第 9 節「事後探索分析」。）
 """
 import itertools
 import os
@@ -633,6 +634,9 @@ def main():
                   ("rho_hist.png", "對齊 ρ 分布"), *[(f"bland_altman_rom_{e}.png", f"Bland-Altman（ROM，{e}）") for e in EX]]:
         w(f"- `fig/{fn}`：{t}")
     w("")
+    ex_md = f"{OUT}/explore/explore.md"          # 追加 19 B：事後探索分析（scripts/gap_explore.py 產生；不參與判定）
+    if os.path.exists(ex_md):
+        L.append(open(ex_md).read())
     open(f"{OUT}/gap_report.md", "w").write("\n".join(L))
     figures(pp, ang, al, main_keys, chk)
     print("→", f"{OUT}/gap_report.md")
