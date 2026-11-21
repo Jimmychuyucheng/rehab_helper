@@ -11,6 +11,8 @@ v7 T4（依追加 7 B、C 調整）：產生共同骨架資料集，三檔樣本
   另存 skeleton_centered（只減 HipMid、未正規化），供 T6 以配對參考幀（追加 7 B）重新正規化。
 - MediaPipe：world → 共同骨架（軸向 (x,y,z)→(-x,-y,z)）→ 逐幀減 HipMid；不遮罩、不補齊、不正規化。
   偵測失敗的幀為 NaN；visibility、detected 另存。模型輸入（追加 7 D）由使用端呼叫 fill_undetected()。
+- 追加 11：MediaPipe 讀翻轉後重跑的 raw/（原本鏡像畫面的輸出在 raw_mirrored/，不用）；失敗率、骨架合理率與
+  主分析集改讀 qc/qc_hflip.csv（scripts/recompute_qc_hflip.py 產生）。
 - fold：直接取 rgb_manifest.csv 的 fold（追加 1 A：沿用 380 筆時 seed 42 的受試者分層 5 折，不重新切分），
   並檢查與 dataset.make_subject_folds(v3 380 筆) 一致。**T5 須使用樣本內存的 fold，不可對 347 筆重新切分。**
 
@@ -58,7 +60,7 @@ def main():
     man = pd.read_csv(MANIFEST)
     crop = pd.read_csv(CROP).set_index("sample_id")
     sc = pd.read_csv(f"{QC}/scene_labels.csv", index_col=0)
-    ff = pd.read_csv(f"{QC}/diag_t2/fail_features.csv", index_col=0)
+    ff = pd.read_csv(f"{QC}/qc_hflip.csv", index_col=0)          # 追加 11 C：翻轉後重算
     exc = pd.read_csv(f"{QC}/excluded.csv").set_index("key")
 
     # fold 檢查：manifest 的 fold = 380 筆 v3 以 seed 42 切分的結果
@@ -76,7 +78,8 @@ def main():
         base.update(sample_id=int(r.sample_id), key=key, fold=int(r.fold), scene=int(sc.loc[key, "scene"]),
                     backlit=bool(sc.loc[key, "backlit_scene_1_4"]),
                     excluded_reason=exc.loc[key, "reason"] if key in exc.index else None)
-        base["main_set"] = (not base["backlit"]) and float(ff.loc[key, "fail_heavy"]) <= 0.2   # 追加 6 A
+        base["main_set"] = (not base["backlit"]) and float(ff.loc[key, "fail_heavy"]) <= 0.2   # 追加 6 A、11 C
+        assert base["main_set"] == bool(ff.loc[key, "main_set"]), key
 
         # Kinect
         path = os.path.join("data/kimore/raw", r.group, r.subgroup, r.subject, r.exercise, "Raw", c.source_file)
@@ -112,7 +115,10 @@ def main():
         meta.update(normalized=False, unit="公尺（MediaPipe world），已逐幀減 HipMid",
                     missing="偵測失敗的幀為 NaN；未依 visibility 遮罩（模型輸入用 fill_undetected，角度特徵用 vis < 0.5 遮罩）",
                     frame_index="影片幀號（0 起算）；對應 Kinect 原始 CSV 行由 T6 求出",
-                    model_sha256=pd.read_csv(f"{MP_RAW}/{m}/extract_log.csv").model_sha256.iloc[0])
+                    model_sha256=pd.read_csv(f"{MP_RAW}/{m}/extract_log.csv").model_sha256.iloc[0],
+                    hflip=True, hflip_note="追加 11 A：影片解碼後水平翻轉再送入 MediaPipe")
+        log = pd.read_csv(f"{MP_RAW}/{m}/extract_log.csv")
+        assert log.hflip.astype(str).eq("True").all() and log.status.eq("ok").all(), m
         with open(f"{OUT}/kimore_mp_common_{m}_v1.pkl", "wb") as f:
             pickle.dump({"meta": meta, "samples": ss}, f)
     report(k_samples, mp)

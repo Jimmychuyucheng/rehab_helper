@@ -11,8 +11,10 @@ v7 3.1 + 追加 1 C 第 5 點：MediaPipe Pose Landmarker 擷取（VIDEO 模式�
   pts_ms     (T,)       float64  容器 PTS（cv2 CAP_PROP_POS_MSEC），只供參考，不是真實時間
   ts_ms      (T,)       int64    餵給 MediaPipe 的時間戳 = round(frame_idx × 1000 / 30)
 完成後在 {out}/extract_log.csv 追加一列。已存在的 npz 跳過（可續跑）。
+--hflip（追加 11 A）：解碼後先水平翻轉再送入 MediaPipe（KIMORE RGB 整批是鏡像畫面），不另存影片；
+  image 座標是翻轉後畫面的座標。預設關閉 = 原本 T2 的行為。
 
-    python run_mediapipe.py --model full --out data/kimore/mediapipe/raw/full --workers 14 [--only E_ID14_Es2 ...]
+    python run_mediapipe.py --model full --out data/kimore/mediapipe/raw/full --workers 14 [--hflip] [--only E_ID14_Es2 ...]
 
 環境（追加 4 A）：rehab env + mediapipe 1.2.3；需 conda 的 libegl、libgl、libgles（CPU 也要 EGL/GLES）。
 ffprobe：rehab env 沒有 ffprobe，借用 mediatools env 的，執行前先
@@ -36,7 +38,7 @@ RGB = "data/kimore/rgb"
 MODELS = "data/kimore/mediapipe/models"
 KINECT_HZ = 30.0
 LOG_FIELDS = ["key", "rgb_path", "model", "model_sha256", "mediapipe", "frames", "frames_meta", "fps_ffprobe",
-              "fail_frac", "mean_visibility", "ts_monotonic", "elapsed_s", "status"]
+              "fail_frac", "mean_visibility", "ts_monotonic", "elapsed_s", "status", "hflip"]
 
 
 def list_videos():
@@ -67,7 +69,7 @@ def ffprobe_fps(path):
         return ""
 
 
-def extract(key, path, model_path, out_dir):
+def extract(key, path, model_path, out_dir, hflip=False):
     import mediapipe as mp
     from mediapipe.tasks.python import BaseOptions, vision
 
@@ -86,6 +88,8 @@ def extract(key, path, model_path, out_dir):
             if not ok:
                 break
             pts.append(cap.get(cv2.CAP_PROP_POS_MSEC))
+            if hflip:
+                bgr = cv2.flip(bgr, 1)
             ts = int(round(i * 1000.0 / KINECT_HZ))
             img = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
             r = lm.detect_for_video(img, ts)
@@ -114,7 +118,7 @@ def extract(key, path, model_path, out_dir):
             "fps_ffprobe": ffprobe_fps(path), "fail_frac": round(1 - det.mean(), 4) if len(det) else 1.0,
             "mean_visibility": round(float(vis[det].mean()), 4) if det.any() else 0.0,
             "ts_monotonic": bool(np.all(np.diff(tss) > 0)), "elapsed_s": round(time.time() - t0, 1),
-            "status": "ok", "mediapipe": mp.__version__}
+            "status": "ok", "mediapipe": mp.__version__, "hflip": bool(hflip)}
 
 
 def main():
@@ -123,6 +127,7 @@ def main():
     ap.add_argument("--out", default="data/kimore/mediapipe/raw")
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 2))
     ap.add_argument("--only", nargs="*", help="只跑這些 key（{subject}_{Es}）")
+    ap.add_argument("--hflip", action="store_true", help="追加 11 A：送入前水平翻轉（預設關閉）")
     args = ap.parse_args()
 
     model_path = os.path.join(MODELS, f"pose_landmarker_{args.model}.task")
@@ -135,7 +140,7 @@ def main():
             sys.exit(f"找不到影片：{sorted(missing)}")
         vids = {k: vids[k] for k in args.only}
     todo = {k: p for k, p in vids.items() if not os.path.exists(os.path.join(args.out, f"{k}.npz"))}
-    print(f"{args.model}: {len(vids)} 部，待跑 {len(todo)} 部，workers={args.workers}", flush=True)
+    print(f"{args.model}: {len(vids)} 部，待跑 {len(todo)} 部，workers={args.workers}，hflip={args.hflip}", flush=True)
 
     log_path = os.path.join(args.out, "extract_log.csv")
     new_log = not os.path.exists(log_path)
@@ -143,7 +148,7 @@ def main():
         w = csv.DictWriter(f, fieldnames=LOG_FIELDS)
         if new_log:
             w.writeheader()
-        futs = {ex.submit(extract, k, p, model_path, args.out): k for k, p in todo.items()}
+        futs = {ex.submit(extract, k, p, model_path, args.out, args.hflip): k for k, p in todo.items()}
         for n, fu in enumerate(as_completed(futs), 1):
             k = futs[fu]
             try:

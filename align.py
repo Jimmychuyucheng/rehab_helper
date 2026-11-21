@@ -1,6 +1,6 @@
 """
 v7 T6：Kinect ↔ MediaPipe 時間對齊、整部鏡像、逐幀左右標反比例、共同參考幀
-（第 3.4 節；追加 3、4 B、7 B、7 E、8 B、10）。
+（第 3.4 節；追加 3、4 B、7 B、7 E、8 B、10、11、12、13）。
 
 對應關係（追加 10 B）：影片第 i 幀 ↔ Kinect 原始 CSV 第 r(i) 行，是錄影本身的屬性：
   heavy 與 full 各求一次，取峰值 ρ 較高者，兩個模型共用同一組對應。
@@ -8,11 +8,18 @@ v7 T6：Kinect ↔ MediaPipe 時間對齊、整部鏡像、逐幀左右標反比
     漂移檢查（追加 10 D）：重疊段前半、後半各找一次 k；兩半段 ρ 都 ≥ 0.7 且 k 相差 > 2 幀 → 改用線性對應；
     否則不判定漂移，沿用整部的 k。
   - 24 fps（追加 7 E）：r(i) = round(a + b·i)，每部各自搜尋 a、b。
-  - 峰值 ρ < 0.7 → 「對齊不可靠」（追加 10 C：不做 DTW；只從逐幀指標排除）。
-對齊訊號（追加 10 A）：畫面上的絕對位置。MediaPipe 影像座標 (x, y)，對 Kinect **未減髖部**的相機座標 (−X, −Y)
-  （軸向依資料確認：Kinect 左肩 X < 右肩 X、MediaPipe 影像左肩 x > 右肩 x；Kinect Y 向上、影像 y 向下）。
-  關節 = 肩、肘、腕、髖、膝、踝 12 點；每個關節的 x、y 各自 z-score（MediaPipe 用偵測到的幀，Kinect 用保留段），
-  串接成 24 維訊號，ρ = 兩邊都有值的幀上 24 維合併的 Pearson 相關。影像座標只用來求對應，不進入任何量測。
+  - 峰值 ρ < 0.7，或共用對應下的有效配對幀 < 100 → 「對齊不可靠」（追加 10 C：不做 DTW；只從逐幀指標排除；
+    追加 13 B：合理幀少於 100 幀）。有效配對幀 = Kinect 保留段內、且 MediaPipe 偵測到並通過骨架合理規則的幀。
+對齊訊號（追加 10 A、11 D、12 C）：畫面上的絕對位置，且不受左右標記影響。MediaPipe 影像座標 (x, y)，
+  對 Kinect **未減髖部**的相機座標 (−X, −Y)（軸向依資料確認；Kinect Y 向上、影像 y 向下）。
+  追加 12 C：左右成對的關節（肩、肘、腕、髖、膝、踝）只用「左右平均位置 (x, y)」與「左右水平距離 |xL − xR|」，
+  另加中線點 Head、ShoulderMid、HipMid 的 (x, y)；共 9 點 × 2 + 6 距離 = 24 欄，左右標記對調時不變。
+  （MediaPipe Head = 左右耳中點、ShoulderMid／HipMid = 左右中點，同 common_skeleton；Kinect 取共同骨架的同名點。）
+  追加 13 B：只在重疊時段計算——每個候選對應下，取「Kinect 保留段內」且「MediaPipe 偵測到並通過追加 6 B
+  骨架合理規則（plausible()）」的幀，在這些幀上每欄去平均、所有欄位共用一個尺度（追加 11 D），再算 24 欄合併的
+  Pearson 相關 ρ。其他幀視為缺漏。影像座標只用來求對應，不進入任何量測。
+  影片已在 T2 水平翻轉後才送入 MediaPipe（追加 11 A），所以影像 x 與 Kinect −X 同向。
+  鏡像判定與逐幀左右標反仍以左右分開的方式計算（追加 12 C 最後一點）。
 
 鏡像與左右標反：兩邊都用共同骨架、逐幀減 HipMid（追加 7 C）、未正規化的相機軸向（公尺）。
   （正規化的左右軸取自 HipL→HipR；MediaPipe 左右標反時，正規化會把 x 一起翻過來，左右就看不出來。）
@@ -45,14 +52,20 @@ MODELS = ("heavy", "full")
 
 RHO_MIN = 0.7
 DRIFT_MAX = 2
-MIN_PAIRS = 50
+MIN_PAIRS = 50                 # 計算 ρ 所需的最少配對幀（少於此數 ρ = −inf）
+MIN_RELIABLE_FRAMES = 100      # 追加 13 B：有效配對幀少於此數 → 對齊不可靠
 CLEAR_SEP_M = 0.10
 MIRROR_FRAC = 0.5
 B_GRID = np.round(np.arange(0.95, 1.10 + 1e-9, 0.0005), 4)
 IMG_W, IMG_H = 960, 540
-# 對齊訊號的 12 個關節：共同骨架名稱 → MediaPipe 33 點 index
-SIGNAL_JOINTS = {"ShoulderL": 11, "ShoulderR": 12, "ElbowL": 13, "ElbowR": 14, "WristL": 15, "WristR": 16,
-                 "HipL": 23, "HipR": 24, "KneeL": 25, "KneeR": 26, "AnkleL": 27, "AnkleR": 28}
+# 對齊訊號（追加 12 C）：左右成對的關節（共同骨架名稱前綴 → MediaPipe 33 點 index 左、右）與中線點
+SIGNAL_PAIRS = {"Shoulder": (11, 12), "Elbow": (13, 14), "Wrist": (15, 16),
+                "Hip": (23, 24), "Knee": (25, 26), "Ankle": (27, 28)}
+SIGNAL_MID = {"Head": (7, 8), "ShoulderMid": (11, 12), "HipMid": (23, 24)}   # MediaPipe：兩點中點
+# 欄位順序：先 9 個位置點的 (x, y) 交錯（6 個左右平均 + 3 個中線點），再 6 個左右水平距離
+SIGNAL_COL_X = np.arange(0, 18, 2)
+SIGNAL_COL_Y = np.arange(1, 18, 2)
+SIGNAL_COL_D = np.arange(18, 24)
 KINECT_TO_IMAGE = np.array([-1.0, -1.0])     # Kinect (X, Y) → 與影像 (x, y) 同向
 
 
@@ -102,24 +115,53 @@ def plausible(img33):
     return bool(inside and (h[1] - s[1]) * IMG_H > 40 and abs(img33[11, 0] - img33[12, 0]) * IMG_W > 15)
 
 
-def _z(x):
-    """逐欄 z-score（忽略 NaN）。"""
-    return (x - np.nanmean(x, axis=0)) / np.nanstd(x, axis=0)
+def _scale(x):
+    """追加 11 D：每欄去平均，所有欄位共用一個尺度。x 須已限縮在重疊、有效的幀（追加 13 B），不含 NaN。"""
+    x = x - x.mean(axis=0)
+    return x / x.std()
+
+
+def _lr_invariant(pts_l, pts_r, mids):
+    """追加 12 C：pts_l / pts_r：6 對 (T, 2) 左、右點；mids：3 個 (T, 2) 中線點（都已是影像軸向）。
+    回傳 (T, 24)：9 個位置點 (x, y) 交錯（左右平均、中線點），接 6 個 |xL − xR|。"""
+    pos = [(l + r) / 2 for l, r in zip(pts_l, pts_r)] + list(mids)
+    cols = [p[:, c] for p in pos for c in (0, 1)] + [np.abs(l[:, 0] - r[:, 0]) for l, r in zip(pts_l, pts_r)]
+    return np.stack(cols, axis=1).astype(np.float64)
 
 
 def kinect_signal(d):
-    """(n_raw, 24)：Kinect 未減髖部的 (−X, −Y)，逐欄 z-score；保留段外 NaN。"""
-    Ku = d["Ku"]
-    cols = [Ku[:, J[n], c] * KINECT_TO_IMAGE[c] for n in SIGNAL_JOINTS for c in (0, 1)]
-    return _z(np.stack(cols, axis=1).astype(np.float64))
+    """(n_raw, 24)：Kinect 未減髖部的 (−X, −Y)，左右不變量（追加 12 C）；保留段外 NaN。
+    未去平均、未縮放：追加 13 B 在每個候選對應的重疊幀上才做（corr_at）。"""
+    Ku = d["Ku"].astype(np.float64)
+    pt = lambda n: Ku[:, J[n], :2] * KINECT_TO_IMAGE
+    return _lr_invariant([pt(p + "L") for p in SIGNAL_PAIRS], [pt(p + "R") for p in SIGNAL_PAIRS],
+                         [pt(n) for n in SIGNAL_MID])
 
 
 def mediapipe_signal(d):
-    """(T, 24)：MediaPipe 影像座標 (x, y)，逐欄 z-score；未偵測幀 NaN。"""
-    img = d["image"].astype(np.float64).copy()
-    img[~d["detected"]] = np.nan
-    cols = [img[:, i, c] for i in SIGNAL_JOINTS.values() for c in (0, 1)]
-    return _z(np.stack(cols, axis=1))
+    """(T, 24)：MediaPipe 影像座標 (x, y)，左右不變量（追加 12 C）；未偵測或未通過骨架合理規則的幀 NaN（追加 13 B）。
+    未去平均、未縮放（同 kinect_signal）。"""
+    img = d["image"][..., :2].astype(np.float64).copy()
+    img[~plausible_mask(d)] = np.nan
+    return _lr_invariant([img[:, l] for l, _ in SIGNAL_PAIRS.values()], [img[:, r] for _, r in SIGNAL_PAIRS.values()],
+                         [(img[:, a] + img[:, b]) / 2 for a, b in SIGNAL_MID.values()])
+
+
+def plausible_mask(d):
+    """(T,) bool：偵測到且通過追加 6 B 骨架合理規則。"""
+    if "_plaus" not in d:
+        d["_plaus"] = np.array([bool(det) and plausible(f) for f, det in zip(d["image"], d["detected"])])
+    return d["_plaus"]
+
+
+def overlap_pairs(ks, ms, rows, sel=None):
+    """追加 13 B：候選對應 rows 下兩邊都有值的影片幀 index i（Kinect 保留段內 × MediaPipe 合理幀）。"""
+    v = (rows >= 0) & (rows < len(ks))
+    if sel is not None:
+        v &= sel
+    i = np.flatnonzero(v)
+    ok = np.isfinite(ks[rows[i]]).all(axis=1) & np.isfinite(ms[i]).all(axis=1)
+    return i[ok]
 
 
 # ---------------------------------------------------------------- 對應搜尋
@@ -128,16 +170,13 @@ def _rows(n, a, b):
 
 
 def corr_at(ks, ms, rows, sel=None):
-    """多維 Pearson：ks[rows[i]] 與 ms[i] 在兩邊都有值的 i 上，所有維度合併計算（可用 sel 限縮）。回傳 (ρ, 幀數)。"""
-    v = (rows >= 0) & (rows < len(ks))
-    if sel is not None:
-        v &= sel
-    i = np.flatnonzero(v)
-    a, b = ks[rows[i]], ms[i]
-    ok = np.isfinite(a).all(axis=1) & np.isfinite(b).all(axis=1)
-    if ok.sum() < MIN_PAIRS:
-        return -np.inf, int(ok.sum())
-    return float(np.corrcoef(a[ok].ravel(), b[ok].ravel())[0, 1]), int(ok.sum())
+    """多維 Pearson（追加 13 B）：只用重疊、有效的幀，在這些幀上各自去平均、共用尺度後，所有維度合併計算
+    （可用 sel 限縮）。回傳 (ρ, 幀數)。"""
+    i = overlap_pairs(ks, ms, rows, sel)
+    if len(i) < MIN_PAIRS:
+        return -np.inf, int(len(i))
+    a, b = _scale(ks[rows[i]]), _scale(ms[i])
+    return float(np.corrcoef(a.ravel(), b.ravel())[0, 1]), int(len(i))
 
 
 def search_offset(ks, ms, k_max, sel=None):
@@ -167,9 +206,8 @@ def align(d, ks):
     if d["fps"] == 25:
         rho, k, npair = search_offset(ks, ms, d["diff"])
         rows = _rows(n, k, 1.0)
-        both = np.flatnonzero(np.isfinite(ms).all(1) & (rows < len(ks))
-                              & np.isfinite(ks[np.clip(rows, 0, len(ks) - 1)]).all(1))
-        mid = both[len(both) // 2]
+        both = overlap_pairs(ks, ms, rows)
+        mid = both[len(both) // 2] if len(both) else n // 2
         t = np.arange(n)
         r1 = search_offset(ks, ms, d["diff"], sel=t < mid)
         r2 = search_offset(ks, ms, d["diff"], sel=t >= mid)
@@ -258,7 +296,9 @@ def run_one(key):
                 backlit=d0["backlit"], fps=d0["fps"], diff=d0["diff"], n_video=len(rows), n_raw=d0["n_raw"],
                 seg_start=d0["start"], seg_end=d0["end"],
                 map_from=src, method=shared["method"], k=shared["k"], a=shared["a"], b=shared["b"],
-                rho=shared["rho"], reliable=bool(shared["rho"] >= RHO_MIN),
+                rho=shared["rho"], n_pairs=shared["n_pairs"],
+                reliable=bool(shared["rho"] >= RHO_MIN and shared["n_pairs"] >= MIN_RELIABLE_FRAMES),
+                **{f"n_pairs_{m}": al[m]["n_pairs"] for m in MODELS},
                 **{f"{f}_{m}": al[m][f] for m in MODELS for f in ("rho", "method", "k", "a", "b")},
                 **{f"{f}_{src}": shared.get(f, np.nan) for f in ("k_half1", "rho_half1", "k_half2", "rho_half2",
                                                                  "drift")})
@@ -278,20 +318,24 @@ def plot(r, x, path):
     import matplotlib.pyplot as plt
     d, Ka, Mc, rows = x["d"], x["Ka"], x["d"]["Mc"], x["rows"]
     t = np.arange(len(Mc)) / 30.0
+    # 追加 13 B：只畫重疊、有效的幀，以這些幀去平均、共用尺度（與 ρ 的計算相同）
+    ms_raw = mediapipe_signal(d)
+    i = overlap_pairs(x["ks"], ms_raw, rows)
     ksig = np.full((len(Mc), x["ks"].shape[1]), np.nan)
-    v = (rows >= 0) & (rows < len(x["ks"]))
-    ksig[v] = x["ks"][rows[v]]
-    msig = mediapipe_signal(d)
-    fig, ax = plt.subplots(6, 1, figsize=(14, 15), sharex=True)
-    for a, c, lab in ((ax[0], 1, "image y (12 joints, mean of z)\n+ = down"),
-                      (ax[1], 0, "image x (12 joints, mean of z)\n+ = image right")):
-        a.plot(t, np.nanmean(ksig[:, c::2], axis=1), "k-", lw=1, label="Kinect (−X, −Y)")
-        a.plot(t, np.nanmean(msig[:, c::2], axis=1), "r-", lw=1, alpha=0.8, label=f"MediaPipe {r['model']} image")
+    msig = np.full_like(ksig, np.nan)
+    if len(i):
+        ksig[i], msig[i] = _scale(x["ks"][rows[i]]), _scale(ms_raw[i])
+    fig, ax = plt.subplots(7, 1, figsize=(14, 17), sharex=True)
+    for a, cols, lab in ((ax[0], SIGNAL_COL_Y, "signal: image y\n(9 L/R-invariant pts)\n+ = down\n(overlap, plausible only)"),
+                         (ax[1], SIGNAL_COL_X, "signal: image x\n(9 L/R-invariant pts)\n+ = image right"),
+                         (ax[2], SIGNAL_COL_D, "signal: |xL − xR|\n(6 pairs)")):
+        a.plot(t, np.nanmean(ksig[:, cols], axis=1), "k-", lw=1, label="Kinect (−X, −Y)")
+        a.plot(t, np.nanmean(msig[:, cols], axis=1), "r-", lw=1, alpha=0.8, label=f"MediaPipe {r['model']} image")
         a.set_ylabel(lab)
     panels = [("WristL", 1, "WristL  y (up)"), ("WristR", 1, "WristR  y (up)"),
               ("WristL", 0, "WristL  x (subject-left < 0)"), ("WristR", 0, "WristR  x")]
     fl = x["flips"]["Wrist"]
-    for a, (jn, c, lab) in zip(ax[2:], panels):
+    for a, (jn, c, lab) in zip(ax[3:], panels):
         a.plot(t, Ka[:, J[jn], c], "k-", lw=1, label="Kinect")
         a.plot(t, Mc[:, J[jn], c], "r-", lw=1, alpha=0.8, label="MediaPipe")
         if fl.any():
@@ -306,15 +350,16 @@ def plot(r, x, path):
             a.plot(t[undet], np.full(undet.sum(), yl[0]), "|", color="orange", ms=8)
         a.grid(alpha=0.3)
     ax[0].legend(loc="upper right", fontsize=8)
-    ax[2].legend(loc="upper right", fontsize=8)
+    ax[3].legend(loc="upper right", fontsize=8)
     if r["method"] == "offset":
         src = r["map_from"]
         m = (f"offset k={r['k']} (halves k={r[f'k_half1_{src}']}/{r[f'k_half2_{src}']}, "
              f"ρ={r[f'rho_half1_{src}']:.2f}/{r[f'rho_half2_{src}']:.2f})")
     else:
         m = f"{r['method']} row = {r['a']} + {r['b']:.4f}·i"
+    m += f"  pairs={r['n_pairs']}"
     if not r["reliable"]:
-        m += "  [ρ<0.7: UNRELIABLE → excluded from per-frame metrics]"
+        m += "  [ρ<0.7 or pairs<100: UNRELIABLE → excluded from per-frame metrics]"
     fig.suptitle(f"{r['key']} [{r['subgroup']}, {r['fps']:.0f} fps]  plotted: MediaPipe {r['model']} "
                  f"(fail {r['mp_fail']:.1%})\nshared mapping from {r['map_from']}: {m}  ρ={r['rho']:.3f} "
                  f"(heavy {r['rho_heavy']:.3f} / full {r['rho_full']:.3f})\n"
@@ -348,6 +393,7 @@ def main():
         r = rr[0]
         print(f"{key}: ρ heavy {r['rho_heavy']:.3f} ({r['method_heavy']} a={r['a_heavy']} b={r['b_heavy']:.4f}) | "
               f"full {r['rho_full']:.3f} ({r['method_full']} a={r['a_full']} b={r['b_full']:.4f}) → 用 {r['map_from']}"
+              f"（有效配對 {r['n_pairs']} 幀）"
               f"{'' if r['reliable'] else '（不可靠）'}；"
               + "；".join(f"{x['model']} 腕標反 {x['flip_wrist']:.1%} 踝 {x['flip_ankle']:.1%}"
                          f"{' 鏡像' if x['mirrored'] else ''} 參考幀 {x['n_ref']}" for x in rr))
