@@ -1,6 +1,6 @@
 """
 v7 T6：Kinect ↔ MediaPipe 時間對齊、整部鏡像、逐幀左右標反比例、共同參考幀
-（第 3.4 節；追加 3、4 B、7 B、7 E、8 B、10、11、12、13）。
+（第 3.4 節；追加 3、4 B、7 B、7 E、8 B、10、11、12、13、14）。
 
 對應關係（追加 10 B）：影片第 i 幀 ↔ Kinect 原始 CSV 第 r(i) 行，是錄影本身的屬性：
   heavy 與 full 各求一次，取峰值 ρ 較高者，兩個模型共用同一組對應。
@@ -10,6 +10,11 @@ v7 T6：Kinect ↔ MediaPipe 時間對齊、整部鏡像、逐幀左右標反比
   - 24 fps（追加 7 E）：r(i) = round(a + b·i)，每部各自搜尋 a、b。
   - 峰值 ρ < 0.7，或共用對應下的有效配對幀 < 100 → 「對齊不可靠」（追加 10 C：不做 DTW；只從逐幀指標排除；
     追加 13 B：合理幀少於 100 幀）。有效配對幀 = Kinect 保留段內、且 MediaPipe 偵測到並通過骨架合理規則的幀。
+    「100 幀」的解讀（使用者 2026-11-22 確認）：算的是**選定的共用對應下**、上述重疊且合理的幀數（n_pairs），
+    不是整部影片的合理幀數；保留段很短的影片（如 E_ID14_Es2）真正能用來求對應的只有重疊段。
+Kinect 覆蓋率與保留段時段（追加 14）：kinect_coverage = 保留段行數 (end − start) ÷ 影片幀數（描述用，不據此排除）。
+  seg_video_first／seg_video_last／n_seg_video = 依共用對應換算後落在保留段 [start, end) 內的影片幀（T7 的 MediaPipe
+  只用這些幀）；n_seg_truncated = 保留段超出影片頭尾對應範圍而截掉的行數（24 fps 線性對應中間跳過的行不算）。
 對齊訊號（追加 10 A、11 D、12 C）：畫面上的絕對位置，且不受左右標記影響。MediaPipe 影像座標 (x, y)，
   對 Kinect **未減髖部**的相機座標 (−X, −Y)（軸向依資料確認；Kinect Y 向上、影像 y 向下）。
   追加 12 C：左右成對的關節（肩、肘、腕、髖、膝、踝）只用「左右平均位置 (x, y)」與「左右水平距離 |xL − xR|」，
@@ -302,6 +307,11 @@ def run_one(key):
                 **{f"{f}_{m}": al[m][f] for m in MODELS for f in ("rho", "method", "k", "a", "b")},
                 **{f"{f}_{src}": shared.get(f, np.nan) for f in ("k_half1", "rho_half1", "k_half2", "rho_half2",
                                                                  "drift")})
+    inseg = np.flatnonzero((rows >= d0["start"]) & (rows < d0["end"]))      # 追加 14 A
+    base.update(kinect_coverage=(d0["end"] - d0["start"]) / len(rows),
+                seg_video_first=int(inseg[0]) if len(inseg) else -1,
+                seg_video_last=int(inseg[-1]) if len(inseg) else -1, n_seg_video=int(len(inseg)),
+                n_seg_truncated=int(max(0, d0["end"] - (rows.max() + 1)) + max(0, rows.min() - d0["start"])))
     res, extra = [], {}
     for m in MODELS:
         c, x = checks(ds[m], rows)
