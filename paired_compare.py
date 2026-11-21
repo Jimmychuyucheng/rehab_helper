@@ -16,13 +16,14 @@ Q1（第 3.6 節）：每部影片 v、每個 seed s，用 v 所在測試折的 
   - K_common ：Kinect，共同參考幀正規化（追加 8 B）。
   - M        ：MediaPipe，共同參考幀正規化；未偵測的幀線性內插（追加 7 D，fill_undetected）。
   - M_swap   ：追加 11 E 敏感度分析——以 Kinect 為參考，把 MediaPipe 左右標反的幀左右換回後再預測。
-               逐幀判斷：6 對左右關節（肩、肘、腕、髖、膝、踝）合計的 x、y 距離，交叉配對比同側配對小 → 整幀左右對調
-               （未正規化、逐幀減 HipMid 的相機座標，同 align.lr_flip）。只用於「若左右判斷正確時的落差」，不參與判定。
+               追加 17 B：上半身（肩、肘、腕）依肩與腕、下半身（髖、膝、踝、腳）依髖與踝，各自逐幀判斷：
+               交叉配對的 x、y 距離和比同側小 → 該部位左右對調（未正規化、逐幀減 HipMid 的相機座標，同 align.lr_flip）。
+               只用於「若左右判斷正確時的落差」，不參與判定。
   追加 8 B 的檢查量 |K_own − K_common| 逐部列出；中位數與 N/2 的比較在彙整時做。
-Q2／Q3（第 3.7 節；特徵定義見 FEATURES，**暫定清單，待使用者依特徵函式庫確認**）：
+Q2／Q3（第 3.7 節；特徵定義見 features_v7.py 與 runs/v7_gap/feature_list.md，追加 17 A）：
   - 角度在共同參考幀正規化後的座標上計算。MediaPipe 端 visibility < 0.5 的關節視為缺漏（追加 7 D），
     該幀用到此關節的角度為 NaN；有效幀比例 < 50% → 該影片不納入該特徵（valid_ok = False）。Kinect 不遮罩。
-  - 摘要值（決策用）：ROM = P95 − P5、峰值 = P95（暫定，待確認）。兩邊各自在保留段時段上計算（追加 14 A）。
+  - 摘要值（決策用）：ROM = P95 − P5、峰值 = P95（追加 17 A）。兩邊各自在保留段時段上計算（追加 14 A）。
   - 逐幀：MediaPipe 第 i 幀 ↔ Kinect 第 r(i) 行，兩邊都有值的幀上的 MAE（度）；只在對齊可靠（追加 10 C、13 B）的影片計算，
     不可靠者 frame_mae = NaN（仍輸出摘要值）。
   - 角度差的週期性：方向角（旋轉、傾角）以 (M − K + 180) mod 360 − 180 計算差值。
@@ -58,78 +59,10 @@ MODELS = ("heavy", "full")
 OUT_FRAMES, EVAL_WINDOWS, EVAL_CROP = 100, 5, 0.5          # 與 T5（train_rehab.run_fold）相同
 TS_MIN, TS_MAX = 10.0, 50.0
 VALID_MIN = 0.5
-LR_PAIRS = ["Shoulder", "Elbow", "Wrist", "Hip", "Knee", "Ankle"]
 
 
-# ---------------------------------------------------------------- 角度
-def _ang3(X, a, b, c):
-    """三點角度 ∠abc（度），X: (T,17,3)。"""
-    u, v = X[:, J[a]] - X[:, J[b]], X[:, J[c]] - X[:, J[b]]
-    cos = (u * v).sum(-1) / (np.linalg.norm(u, axis=-1) * np.linalg.norm(v, axis=-1))
-    return np.degrees(np.arccos(np.clip(cos, -1, 1)))
-
-
-def _seg_vs_down(X, a, b):
-    """a→b 段與「向下」軸（−y）的夾角（度）：上臂 Shoulder→Elbow 用來量肩屈曲／外展。"""
-    v = X[:, J[b]] - X[:, J[a]]
-    return np.degrees(np.arccos(np.clip(-v[:, 1] / np.linalg.norm(v, axis=-1), -1, 1)))
-
-
-def _tilt_frontal(X, a, b):
-    """a→b 段在冠狀面（x–y）相對垂直軸的側傾角（度，帶正負）。"""
-    v = X[:, J[b]] - X[:, J[a]]
-    return np.degrees(np.arctan2(v[:, 0], v[:, 1]))
-
-
-def _tilt_sagittal(X, a, b):
-    """a→b 段在矢狀面（z–y）相對垂直軸的前傾角（度，帶正負）。"""
-    v = X[:, J[b]] - X[:, J[a]]
-    return np.degrees(np.arctan2(v[:, 2], v[:, 1]))
-
-
-def _yaw(X, a, b):
-    """a→b 連線在水平面（x–z）上的方向角（度）。"""
-    v = X[:, J[b]] - X[:, J[a]]
-    return np.degrees(np.arctan2(v[:, 2], v[:, 0]))
-
-
-def _wrap(d):
-    return (d + 180.0) % 360.0 - 180.0
-
-
-def trunk_rotation(X):
-    return _wrap(_yaw(X, "ShoulderL", "ShoulderR") - _yaw(X, "HipL", "HipR"))
-
-
-# 暫定特徵清單（待使用者依特徵函式庫確認）：名稱 → (動作, 函式, 用到的關節, 是否為方向角)
-FEATURES = {
-    "Es1": {
-        "shoulder_flex_L": (lambda X: _seg_vs_down(X, "ShoulderL", "ElbowL"), ["ShoulderL", "ElbowL"], False),
-        "shoulder_flex_R": (lambda X: _seg_vs_down(X, "ShoulderR", "ElbowR"), ["ShoulderR", "ElbowR"], False),
-        "elbow_L": (lambda X: _ang3(X, "ShoulderL", "ElbowL", "WristL"), ["ShoulderL", "ElbowL", "WristL"], False),
-        "elbow_R": (lambda X: _ang3(X, "ShoulderR", "ElbowR", "WristR"), ["ShoulderR", "ElbowR", "WristR"], False),
-    },
-    "Es2": {
-        "trunk_lateral_tilt": (lambda X: _tilt_frontal(X, "HipMid", "ShoulderMid"), ["HipL", "HipR", "ShoulderL", "ShoulderR"], True),
-        "shoulder_flex_L": (lambda X: _seg_vs_down(X, "ShoulderL", "ElbowL"), ["ShoulderL", "ElbowL"], False),
-        "shoulder_flex_R": (lambda X: _seg_vs_down(X, "ShoulderR", "ElbowR"), ["ShoulderR", "ElbowR"], False),
-    },
-    "Es3": {
-        "trunk_rotation": (trunk_rotation, ["HipL", "HipR", "ShoulderL", "ShoulderR"], True),
-    },
-    "Es4": {
-        "pelvis_rotation": (lambda X: _yaw(X, "HipL", "HipR"), ["HipL", "HipR"], True),
-        "pelvis_lateral_tilt": (lambda X: _wrap(np.degrees(np.arctan2(
-            (X[:, J["HipR"]] - X[:, J["HipL"]])[:, 1], (X[:, J["HipR"]] - X[:, J["HipL"]])[:, 0]))), ["HipL", "HipR"], True),
-    },
-    "Es5": {
-        "knee_L": (lambda X: _ang3(X, "HipL", "KneeL", "AnkleL"), ["HipL", "KneeL", "AnkleL"], False),
-        "knee_R": (lambda X: _ang3(X, "HipR", "KneeR", "AnkleR"), ["HipR", "KneeR", "AnkleR"], False),
-        "hip_L": (lambda X: _ang3(X, "ShoulderL", "HipL", "KneeL"), ["ShoulderL", "HipL", "KneeL"], False),
-        "hip_R": (lambda X: _ang3(X, "ShoulderR", "HipR", "KneeR"), ["ShoulderR", "HipR", "KneeR"], False),
-        "trunk_forward_lean": (lambda X: _tilt_sagittal(X, "HipMid", "ShoulderMid"), ["HipL", "HipR", "ShoulderL", "ShoulderR"], True),
-    },
-}
+# ---------------------------------------------------------------- 特徵（追加 17 A：features_v7.py）
+from features_v7 import FEATURES, wrap180 as _wrap  # noqa: E402
 
 
 def summary(a):
@@ -168,25 +101,41 @@ def predict(x_tvc, seed, fold, device):
     return float(out.clamp(TS_MIN / TS_MAX, 1.0).item() * TS_MAX)
 
 
-# ---------------------------------------------------------------- 左右對調（追加 11 E）
+# ---------------------------------------------------------------- 左右對調（追加 11 E、17 B）
+SWAP_PARTS = {   # 部位: (判斷用的關節對, 對調的關節對)
+    "upper": (["Shoulder", "Wrist"], ["Shoulder", "Elbow", "Wrist"]),
+    "lower": (["Hip", "Ankle"], ["Hip", "Knee", "Ankle", "Foot"]),
+}
+
+
 def lr_swap_frames(Ka, Mc):
-    """逐幀：6 對左右關節合計的 x、y 距離，交叉 < 同側 → True。Ka、Mc：(T,17,3) 逐幀減 HipMid、未正規化。"""
-    same = cross = 0.0
-    ok = np.ones(len(Mc), bool)
-    for p in LR_PAIRS:
-        kl, kr = Ka[:, J[p + "L"], :2], Ka[:, J[p + "R"], :2]
-        ml, mr = Mc[:, J[p + "L"], :2], Mc[:, J[p + "R"], :2]
-        ok &= np.isfinite(kl[:, 0]) & np.isfinite(kr[:, 0]) & np.isfinite(ml[:, 0]) & np.isfinite(mr[:, 0])
-        d = lambda u, v: np.linalg.norm(u - v, axis=1)
-        same = same + d(ml, kl) + d(mr, kr)
-        cross = cross + d(ml, kr) + d(mr, kl)
-    return ok & (cross < same), ok
+    """
+    追加 17 B：上半身、下半身各自逐幀判斷。判斷用的關節對（上：肩、腕；下：髖、踝）合計的 x、y 距離，
+    交叉配對 < 同側配對 → 該部位對調。Ka、Mc：(T,17,3) 逐幀減 HipMid、未正規化。
+    回傳 {部位: (對調 bool, 可判斷 bool)}。
+    """
+    d = lambda u, v: np.linalg.norm(u - v, axis=1)
+    out = {}
+    for part, (judge, _) in SWAP_PARTS.items():
+        same = cross = 0.0
+        ok = np.ones(len(Mc), bool)
+        for p in judge:
+            kl, kr = Ka[:, J[p + "L"], :2], Ka[:, J[p + "R"], :2]
+            ml, mr = Mc[:, J[p + "L"], :2], Mc[:, J[p + "R"], :2]
+            ok &= np.isfinite(kl[:, 0]) & np.isfinite(kr[:, 0]) & np.isfinite(ml[:, 0]) & np.isfinite(mr[:, 0])
+            same = same + d(ml, kl) + d(mr, kr)
+            cross = cross + d(ml, kr) + d(mr, kl)
+        out[part] = (ok & (cross < same), ok)
+    return out
 
 
-def swap_lr(X, frames):
+def swap_lr(X, swaps):
+    """swaps：lr_swap_frames 的輸出；各部位只對調自己的關節對。"""
     X = X.copy()
-    for a, b in cs.COMMON_FLIP_PAIRS:
-        X[frames, a], X[frames, b] = X[frames, b].copy(), X[frames, a].copy()
+    for part, (frames, _) in swaps.items():
+        for p in SWAP_PARTS[part][1]:
+            a, b = J[p + "L"], J[p + "R"]
+            X[frames, a], X[frames, b] = X[frames, b].copy(), X[frames, a].copy()
     return X
 
 
@@ -216,8 +165,8 @@ def run_video(key, ks, mps, al, t5, device):
         kj = rows - raw0
         assert kj.min() >= 0 and kj.max() < len(seg_K), (key, m, kj.min(), kj.max(), len(seg_K))
         Ka_c = seg_K[kj]                                                            # 未正規化、逐幀減 HipMid
-        swap, swap_ok = lr_swap_frames(Ka_c, Mseg)
-        Mswap = cs.fill_undetected(swap_lr(Mn, swap), det)
+        swaps = lr_swap_frames(Ka_c, Mseg)
+        Mswap = cs.fill_undetected(swap_lr(Mn, swaps), det)
         c.update(status="ok", n_seg_video=hi - lo, n_kinect=len(seg_K), seg_video_first=lo, seg_video_last=hi - 1,
                  map_rows_first=int(rows[0]), map_rows_last=int(rows[-1]), raw_start=raw0, raw_end=int(ks["raw_end"]),
                  n_seg_truncated=int(r.n_seg_truncated), kinect_coverage=float(r.kinect_coverage),
@@ -225,7 +174,8 @@ def run_video(key, ks, mps, al, t5, device):
                  scale_K=pk["scale"], scale_M=pm["scale"], mp_undetected_in_seg=float(1 - det.mean()),
                  ref_hipmid_K=float(np.abs(np.median(Kn[pk["ref_idx"], J["HipMid"]], 0)).max()),
                  ref_hipmid_M=float(np.abs(np.median(Mn[pm["ref_idx"], J["HipMid"]], 0)).max()),
-                 swap_frac=float(swap[swap_ok].mean()) if swap_ok.any() else np.nan, swap_n=int(swap_ok.sum()))
+                 **{f"swap_{p}_frac": float(f[ok].mean()) if ok.any() else np.nan for p, (f, ok) in swaps.items()},
+                 **{f"swap_{p}_n": int(ok.sum()) for p, (f, ok) in swaps.items()})
         chk.append(c)
 
         # ---- Q1
@@ -237,13 +187,13 @@ def run_video(key, ks, mps, al, t5, device):
                            K_t5=float(t5[(s, f)].loc[ks["_idx"], "y_pred"]),
                            K_own=predict(K_own, s, f, device), K_common=predict(Kn, s, f, device),
                            M=predict(Mfill, s, f, device), M_swap=predict(Mswap, s, f, device),
-                           swap_frac=c["swap_frac"]))
+                           swap_upper_frac=c["swap_upper_frac"], swap_lower_frac=c["swap_lower_frac"]))
 
         # ---- Q2／Q3
         Mmask = Mn.copy()
         Mmask[~det] = np.nan
         Mmask[vis < cs.VIS_THRESHOLD] = np.nan                                    # 追加 7 D
-        Mmask_sw = swap_lr(Mmask, swap)                                           # 追加 11 E 敏感度分析
+        Mmask_sw = swap_lr(Mmask, swaps)                                           # 追加 11 E 敏感度分析
         for fname, (fn, joints, is_dir) in FEATURES[ks["exercise"]].items():
             ak, am, asw = fn(Kn), fn(Mmask), fn(Mmask_sw)
             vm = float(np.isfinite(am).mean())
