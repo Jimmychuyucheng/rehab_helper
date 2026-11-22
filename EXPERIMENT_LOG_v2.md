@@ -157,4 +157,4 @@ log 印出的各分箱權重正確（低分 ×2.4、高分 ×0.7），loss 也�
 - `runs/baseline/`、`runs/v2_clip_sqrtinv/`：各折 `metrics.json`、`test_predictions.csv`、`summary.md`
 - `runs/compare.md`：三欄對照表（`analyze_runs.py` 產生）
 - `HANDOFF_v2_clip_reweight.md`：給 Claude Code 的 v2 實作指示
-- Git：`f0a03f0` baseline、`18bd5ab` clip + reweight + 區間指標
+- Git：`0fdfb47` baseline、`5d74eb0` clip + reweight + 區間指標
