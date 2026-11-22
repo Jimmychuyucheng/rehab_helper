@@ -18,5 +18,6 @@ Current best wlasl100 model: ./weights/234cf7f2.pth
 | `v7-mediapipe-gap` | v7 | MediaPipe 與 Kinect 骨架落差測試：17 點共同骨架、K-common baseline、對齊、成對比較、落差報告 | `HANDOFF_v7_mediapipe_gap.md`、`docs/v7_gap_report_summary.md`、`docs/v7_feature_list.md` |
 
 注意事項：
-- v7 的判斷標準凍結於 commit `6ccd464`（只存在於 `v7-mediapipe-gap`），這個 branch 的歷史不要 rebase 或改寫。
-- 「Mac vs server v6 比較圖」這個 commit 同時出現在 `v6-kimore-v3`（`1ef73b6`）和 `v7-mediapipe-gap`（`600cdd1`），兩者內容相同，只是 hash 不同。
+- v7 的判斷標準凍結於 commit `4915ae9`（原 `6ccd464`，只存在於 `v7-mediapipe-gap`），這個 branch 的歷史不要再 rebase 或改寫。
+- 2026-11-22 曾為移除 commit 署名改寫過一次歷史（只改 commit message，內容與日期不變），新舊 hash 對照見 `docs/commit_hash_map.md`。
+- 「Mac vs server v6 比較圖」這個 commit 同時出現在 `v6-kimore-v3`（`a1c218b`）和 `v7-mediapipe-gap`（`8bab625`），兩者內容相同，只是 hash 不同。

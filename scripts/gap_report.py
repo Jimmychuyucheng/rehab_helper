@@ -378,7 +378,7 @@ def main():
     w("# v7 落差報告（gap_report）：Kinect ↔ MediaPipe")
     w("")
     w(f"產生：`scripts/gap_report.py`；資料：`runs/v7_gap/{{paired_preds,angles,check}}.csv`（T7，`paired_compare.py`）。")
-    w("判定一律依第 4 節（凍結於 `6ccd464`）與追加 1～18；**判定只用主分析集 × heavy**（追加 5 A、6 A），其他分析集只並列。")
+    w("判定一律依第 4 節（凍結於 `4915ae9`）與追加 1～18；**判定只用主分析集 × heavy**（追加 5 A、6 A），其他分析集只並列。")
     w("")
     w("## 0. 三個判定")
     w("")

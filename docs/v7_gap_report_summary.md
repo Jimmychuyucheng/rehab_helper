@@ -1,7 +1,7 @@
 # v7 Kinect ↔ MediaPipe 落差測試：報告摘要
 
 完整報告：`runs/v7_gap/gap_report.md`（由 `scripts/gap_report.py` 產生；`runs/` 不進 git）。
-判斷標準：HANDOFF v7 第 4 節（凍結於 `6ccd464`）與追加 1～18。**判定只用主分析集 256 部 × MediaPipe heavy**；full、逆光、347 部、左右換回只並列。
+判斷標準：HANDOFF v7 第 4 節（凍結於 `4915ae9`）與追加 1～18。**判定只用主分析集 256 部 × MediaPipe heavy**；full、逆光、347 部、左右換回只並列。
 
 ## 三個判定
 
