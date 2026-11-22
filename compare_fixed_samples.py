@@ -17,7 +17,7 @@ import pandas as pd
 
 from run_paths import run_dir
 
-# (sample, 類別, 說明)；與 commit 1e21047 的清單一致
+# (sample, 類別, 說明)；與 commit 794c76b 的清單一致
 FIXED = [
     ("Expert/E_ID3/Es3", "標籤", "TS 48.33 → 43"),
     ("Expert/E_ID3/Es4", "標籤", "TS 50 → 34.67"),
